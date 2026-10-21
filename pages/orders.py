@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 import streamlit as st
 
 from components.layout import metric_card, section_heading
-from models.entities import Category, Order, OrderItem, Product, Stock
+from models.entities import Category, Comanda, Customer, Order, OrderItem, Product, Stock
 from services.domain import create_order
 from utils.clock import local_today
 from utils.formatting import currency, date_time
@@ -27,6 +27,24 @@ def render(session: Session) -> None:
     with status_cols[2]: metric_card("Concluídos hoje", str(completed_today), "Finalizados")
     products = session.scalars(select(Product).where(Product.active.is_(True), Product.sale_price > 0).order_by(Product.name)).all()
     categories = session.scalars(select(Category).where(Category.active.is_(True)).order_by(Category.name)).all()
+    open_comandas = session.scalars(
+        select(Comanda).where(Comanda.status == "Aberta").order_by(Comanda.created_at)
+    ).all()
+    comanda_ids = {comanda.id for comanda in open_comandas}
+    if st.session_state.get("orders.comanda_target") not in comanda_ids:
+        st.session_state.pop("orders.comanda_target", None)
+    customers_by_id = {
+        customer.id: customer.name
+        for customer in session.scalars(select(Customer)).all()
+    }
+    comanda_labels = {
+        comanda.id: (
+            f"Comanda #{comanda.id} · "
+            f"{customers_by_id.get(comanda.customer_id, 'Cliente sem cadastro')} · "
+            f"{currency(comanda.total)}"
+        )
+        for comanda in open_comandas
+    }
     products_by_id = {product.id: product for product in products}
     category_by_id = {category.id: category.name for category in categories}
     stock_by_product = {stock.product_id: stock for stock in session.scalars(select(Stock).where(
@@ -130,17 +148,45 @@ def render(session: Session) -> None:
             st.write(f"Subtotal · {currency(subtotal)}")
             st.write(f"Descontos · {currency(discount)}")
             st.markdown(f"### Total · {currency(total)}")
-            customer_name = st.text_input("Cliente (opcional)", **persistent_widget("orders.customer_name", ""))
-            phone = st.text_input("Telefone (opcional)", **persistent_widget("orders.customer_phone", ""))
+            comanda_options = [None, *(comanda.id for comanda in open_comandas)]
+            selected_comanda_id = st.selectbox(
+                "Vincular a uma comanda aberta",
+                comanda_options,
+                format_func=lambda value: "Nova comanda" if value is None else comanda_labels[value],
+                key="orders.comanda_target",
+            )
+            if selected_comanda_id is not None:
+                customer = session.get(
+                    Customer,
+                    next(comanda.customer_id for comanda in open_comandas
+                         if comanda.id == selected_comanda_id),
+                )
+                st.caption(
+                    f"Este pedido será somado à Comanda #{selected_comanda_id}"
+                    + (f" · {customer.name}" if customer else "")
+                    + " e enviado à cozinha como um novo lote."
+                )
+                customer_name = ""
+                phone = ""
+            else:
+                customer_name = st.text_input("Cliente (opcional)", **persistent_widget("orders.customer_name", ""))
+                phone = st.text_input("Telefone (opcional)", **persistent_widget("orders.customer_phone", ""))
             notes = st.text_input("Observações do pedido", **persistent_widget("orders.notes", ""))
             if st.button("Finalizar Pedido", type="primary", width="stretch", disabled=not st.session_state.cart):
                 try:
                     created = create_order(session, [{"product_id": product_id, **item} for product_id, item in st.session_state.cart.items()],
-                                           customer_name, phone, notes, st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
+                                           customer_name if selected_comanda_id is None else "",
+                                           phone, notes,
+                                           st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
+                                           comanda_id=selected_comanda_id)
                     st.session_state.cart = {}
-                    st.success(f"Pedido #{created.id} enviado para preparo.")
+                    st.success(
+                        f"Pedido #{created.id} enviado para preparo."
+                        + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
+                    )
                     st.rerun()
                 except ValueError as error:
+                    session.rollback()
                     st.error(str(error))
     st.divider()
     st.subheader("Pedidos recentes")

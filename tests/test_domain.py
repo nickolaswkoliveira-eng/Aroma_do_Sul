@@ -9,14 +9,16 @@ from sqlalchemy.orm import Session
 
 from database.connection import Base
 from models.entities import (
-    Audit, CashMovement, CashSession, Order, Payable, Product, Receivable,
-    RecipeItem, Role, Stock, StockMovement, User,
+    Audit, CashMovement, CashSession, Comanda, ComandaOrder, DemoRecord, Order,
+    Payable, Product, Receivable, RecipeItem, Role, Stock, StockMovement, User,
 )
 from services.domain import (
-    add_cash_movement, close_cash, cmv_for_period, create_order, open_cash, purchase_recommendations,
-    product_unit_costs, stock_level, update_order_status,
+    add_cash_movement, close_cash, close_comanda, cmv_for_period, create_order,
+    open_cash, purchase_recommendations, product_unit_costs, stock_level,
+    update_order_status,
 )
 from services.demo_data import DEMO_MARKER, populate_demo_data
+from services.demo_environment import clear_demo_records
 from services.seed import seed_demo_data
 from components.charts import apply_chart_theme, format_sales_series
 from utils.clock import local_now, local_today
@@ -45,6 +47,78 @@ class DomainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             update_order_status(self.session, order, "Em preparo")
         self.assertAlmostEqual(stock.quantity, initial_quantity - recipe.quantity)
+
+    def test_finalized_order_opens_editable_comanda_and_closes_through_cash(self):
+        product = self.session.scalar(select(Product).where(Product.name == "Café coado"))
+        with patch("services.domain.MODO_DEMONSTRACAO", True):
+            first_order = create_order(
+                self.session, [{"product_id": product.id, "quantity": 1}],
+                customer_name="Ana",
+            )
+            for status in ("Em preparo", "Pronto", "Entregue", "Finalizado"):
+                update_order_status(self.session, first_order, status)
+
+            comanda = self.session.scalar(select(Comanda).where(Comanda.status == "Aberta"))
+            self.assertIsNotNone(comanda)
+            self.assertEqual(comanda.total, first_order.total)
+            self.assertEqual(
+                self.session.scalar(
+                    select(ComandaOrder.order_id).where(
+                        ComandaOrder.comanda_id == comanda.id
+                    )
+                ),
+                first_order.id,
+            )
+
+            second_order = create_order(
+                self.session,
+                [{"product_id": product.id, "quantity": 2}],
+                comanda_id=comanda.id,
+            )
+            self.assertEqual(comanda.total, first_order.total + second_order.total)
+            self.assertEqual(
+                self.session.scalar(
+                    select(ComandaOrder.comanda_id).where(
+                        ComandaOrder.order_id == second_order.id
+                    )
+                ),
+                comanda.id,
+            )
+            with self.assertRaisesRegex(ValueError, "Finalize os pedidos"):
+                close_comanda(self.session, comanda, "Pix")
+
+            for status in ("Em preparo", "Pronto", "Entregue", "Finalizado"):
+                update_order_status(self.session, second_order, status)
+            open_cash(self.session, 20)
+            received = close_comanda(self.session, comanda, "Pix", "Operador")
+
+        self.assertEqual(received, first_order.total + second_order.total)
+        self.assertEqual(comanda.status, "Fechada")
+        movement = self.session.scalar(
+            select(CashMovement).where(
+                CashMovement.description == f"Comanda #{comanda.id}"
+            )
+        )
+        self.assertIsNotNone(movement)
+        self.assertEqual(movement.method, "Pix")
+        self.assertEqual(movement.amount, received)
+        self.assertGreater(
+            self.session.scalar(
+                select(func.count(DemoRecord.id)).where(
+                    DemoRecord.entity == "comanda_pedidos",
+                    DemoRecord.demo.is_(True),
+                )
+            ),
+            0,
+        )
+        clear_demo_records(self.session)
+        self.session.commit()
+        self.assertEqual(
+            self.session.scalar(
+                select(func.count(Comanda.id)).where(Comanda.status == "Aberta")
+            ),
+            0,
+        )
 
     def test_insufficient_ingredient_stock_blocks_order(self):
         product = self.session.scalar(select(Product).where(Product.name == "Cappuccino"))

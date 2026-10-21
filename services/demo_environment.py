@@ -7,15 +7,15 @@ import sqlite3
 import tempfile
 from typing import Iterator
 
-from sqlalchemy import delete, event, select
+from sqlalchemy import URL, create_engine, delete, event, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from database.connection import Base, DemoSessionLocal, demo_engine
 from models.entities import (
-    Audit, CashFlow, CashMovement, CashSession, Category, Customer, DemoRecord,
-    Ingredient, Order, OrderItem, Payable, Product, Receivable, RecipeItem,
-    Role, RolePermission, Stock, StockMovement, User,
+    Audit, CashFlow, CashMovement, CashSession, Category, Comanda, ComandaOrder,
+    Customer, DemoRecord, Ingredient, Order, OrderItem, Payable, Product,
+    Receivable, RecipeItem, Role, RolePermission, Stock, StockMovement, User,
 )
 from utils.clock import local_now
 
@@ -24,24 +24,26 @@ MAX_BACKUP_SIZE_BYTES = 100 * 1024 * 1024
 BACKUP_FORMAT_VERSION = 1
 
 _DEMO_MODELS_TO_DELETE = (
-    CashFlow, CashMovement, OrderItem, StockMovement, RecipeItem, Ingredient,
-    Stock, Payable, Receivable, CashSession, Order, Customer, Product, Category,
-    Audit,
+    CashFlow, CashMovement, ComandaOrder, OrderItem, StockMovement, RecipeItem,
+    Ingredient, Stock, Payable, Receivable, CashSession, Order, Comanda, Customer,
+    Product, Category, Audit,
 )
 _DEMO_MODELS_BY_TABLE = {model.__tablename__: model for model in _DEMO_MODELS_TO_DELETE}
 _TRACKED_DEMO_MODELS = frozenset(_DEMO_MODELS_TO_DELETE)
 _ALL_MODELS_BY_TABLE = {
     model.__tablename__: model
     for model in (
-        Audit, CashFlow, CashMovement, CashSession, Category, Customer,
-        DemoRecord, Ingredient, Order, OrderItem, Payable, Product, Receivable,
-        RecipeItem, Role, RolePermission, Stock, StockMovement, User,
+        Audit, CashFlow, CashMovement, CashSession, Category, Comanda,
+        ComandaOrder, Customer, DemoRecord, Ingredient, Order, OrderItem,
+        Payable, Product, Receivable, RecipeItem, Role, RolePermission, Stock,
+        StockMovement, User,
     )
 }
 _PROTECTED_TABLES = (
     "perfis", "permissoes", "perfil_permissoes", "usuarios",
     "auditoria_login", "auditoria",
 )
+_LEGACY_OPTIONAL_BACKUP_TABLES = {"comandas", "comanda_pedidos"}
 
 
 def _track_new_demo_records(session: Session, flush_context, instances) -> None:
@@ -199,7 +201,8 @@ def _validate_backup(path: Path) -> None:
                 )
             }
             required_tables = set(Base.metadata.tables)
-            if not required_tables.issubset(existing_tables):
+            missing_tables = required_tables - existing_tables
+            if missing_tables - _LEGACY_OPTIONAL_BACKUP_TABLES:
                 raise ValueError(
                     "O arquivo não contém o esquema completo de backup deste aplicativo."
                 )
@@ -212,6 +215,14 @@ def _validate_backup(path: Path) -> None:
                 raise ValueError("O backup contém relacionamentos inconsistentes.")
     except sqlite3.DatabaseError as error:
         raise ValueError("O arquivo enviado não é um backup SQLite válido.") from error
+
+
+def _ensure_backup_schema(database_path: Path) -> None:
+    backup_engine = create_engine(URL.create("sqlite", database=str(database_path)))
+    try:
+        Base.metadata.create_all(backup_engine)
+    finally:
+        backup_engine.dispose()
 
 
 def _ensure_current_database_is_demo_only(session: Session) -> None:
@@ -344,6 +355,7 @@ def restore_demo_backup(
             temporary.write(backup_data)
             temporary_path = Path(temporary.name)
         _validate_backup(temporary_path)
+        _ensure_backup_schema(temporary_path)
 
         _ensure_current_database_is_demo_only(session)
         backup_path = create_automatic_backup(engine, backup_directory)

@@ -115,6 +115,23 @@ class Order(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class Comanda(Base):
+    __tablename__ = "comandas"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("clientes.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="Aberta", index=True)
+    total: Mapped[float] = mapped_column(Float, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ComandaOrder(Base):
+    __tablename__ = "comanda_pedidos"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    comanda_id: Mapped[int] = mapped_column(ForeignKey("comandas.id"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("pedidos.id"), unique=True, index=True)
+
+
 class OrderItem(Base):
     __tablename__ = "itens_pedido"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

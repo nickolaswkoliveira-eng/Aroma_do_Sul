@@ -26,6 +26,7 @@ def render_operational_home(session: Session, user_name: str, available_pages: S
 
     actions = [
         ("＋  Novo pedido", "Pedidos", "primary"),
+        ("Comandas", "Comandas", "secondary"),
         ("Cozinha", "Cozinha", "secondary"),
         ("Caixa", "Caixa", "secondary"),
         ("Estoque", "Estoque", "secondary"),

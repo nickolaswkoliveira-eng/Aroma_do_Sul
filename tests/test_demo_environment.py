@@ -171,6 +171,35 @@ class DemoEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(self.session.scalar(select(func.count(Order.id))), order_count)
 
+    def test_import_adds_comanda_tables_to_legacy_backup(self):
+        legacy_path = self.directory / "legacy-demo.sqlite3"
+        legacy_engine = create_engine(URL.create("sqlite", database=str(legacy_path)))
+        legacy_tables = [
+            table for table in Base.metadata.sorted_tables
+            if table.name not in {"comandas", "comanda_pedidos"}
+        ]
+        try:
+            Base.metadata.create_all(legacy_engine, tables=legacy_tables)
+        finally:
+            legacy_engine.dispose()
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+
+        restore_demo_backup(
+            self.session, legacy_path.read_bytes(), "ADMIN",
+            self.engine, self.backup_directory,
+        )
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertIn("comandas", tables)
+        self.assertIn("comanda_pedidos", tables)
+
     def test_import_refuses_to_replace_unmarked_operational_data(self):
         self._populate()
         backup_data = export_demo_data(self.session, "ADMIN", self.engine)

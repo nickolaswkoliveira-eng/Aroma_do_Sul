@@ -9,13 +9,14 @@ from config import (
 )
 from database.connection import get_session, init_database
 from models.entities import Role, User
-from pages import cash, dashboard, finance, intelligence, inventory, kitchen, orders, reports, settings, users
+from pages import cash, commands, dashboard, finance, intelligence, inventory, kitchen, orders, reports, settings, users
 from services.auth import authenticate, can_access, create_user, seed_access_control
 from utils.session_state import RESET_SESSION_ON_RERUN, initialize_app_state, persistent_text_input
 
 
 MODULES = {
     "Pedidos": (orders.render, "orders", "🛒", "Registre pedidos, clientes e observações."),
+    "Comandas": (commands.render, "orders", "🧾", "Acompanhe contas abertas e receba no caixa."),
     "Cozinha": (kitchen.render, "kitchen:view", "👨‍🍳", "Acompanhe preparo e andamento em tempo real."),
     "Estoque": (inventory.render, "inventory", "📦", "Produtos, insumos e fichas técnicas."),
     "Caixa": (cash.render, "cash", "💰", "Abertura, movimentos e fechamento do turno."),
@@ -120,7 +121,9 @@ def main() -> None:
             permission = target[1]
             if MODO_HOMOLOGACAO or permission is None:
                 visible[name] = target
-            elif name == "Pedidos" and (can_access(session, current_user, "orders") or can_access(session, current_user, "orders:create")):
+            elif name in ("Pedidos", "Comandas") and (can_access(session, current_user, "orders") or can_access(session, current_user, "orders:create")):
+                visible[name] = target
+            elif name == "Comandas" and can_access(session, current_user, "cash"):
                 visible[name] = target
             elif name == "Relatórios" and can_access(session, current_user, "reports"):
                 visible[name] = target
@@ -132,16 +135,10 @@ def main() -> None:
         if "Relatórios" in visible:
             visible["Visão geral"] = (dashboard.render, "reports", "◷", "Indicadores gerenciais do negócio.")
 
-        operation_items = []
-        if "Pedidos" in visible:
-            operation_items.append(("Pedidos · novo pedido", "Pedidos"))
-        for name in ("Cozinha", "Caixa", "Estoque"):
-            if name in visible:
-                operation_items.append((name, name))
         management_items = []
         if "Visão geral" in visible:
             management_items.append(("Visão geral", "Visão geral"))
-        for name in ("Relatórios", "Financeiro"):
+        for name in ("Comandas", "Relatórios", "Financeiro"):
             if name in visible:
                 management_items.append((name, name))
         intelligence_items = (
@@ -152,7 +149,6 @@ def main() -> None:
             (name, name) for name in ("Configurações", "Usuários") if name in visible
         ]
         groups = {
-            "Operação": operation_items,
             "Gestão": management_items,
             "Inteligência": intelligence_items,
             "Configurações": configuration_items,
@@ -163,6 +159,7 @@ def main() -> None:
             profile_name,
             _navigate,
             None if MODO_HOMOLOGACAO else _logout,
+            mobile_destinations=tuple(visible),
         )
 
         if st.session_state.active_page == "Início":
@@ -185,9 +182,23 @@ def main() -> None:
             )
             return
         render_function, _, _, _ = visible[selected]
-        if selected == "Pedidos":
+        if selected == "Comandas":
+            commands.render(
+                session,
+                can_add=MODO_HOMOLOGACAO or (
+                    current_user is not None
+                    and can_access(session, current_user, "orders:create")
+                ),
+                can_close=MODO_HOMOLOGACAO or (
+                    current_user is not None
+                    and can_access(session, current_user, "cash")
+                ),
+            )
+        elif selected == "Pedidos":
             render_qr()
-        render_function(session)
+            render_function(session)
+        else:
+            render_function(session)
     finally:
         session.close()
 

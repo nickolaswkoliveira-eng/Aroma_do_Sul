@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta
-from sqlalchemy import select
+from datetime import timedelta
+from sqlalchemy import func, select
 import streamlit as st
 
 from components.layout import metric_card, section_heading
@@ -44,16 +44,23 @@ def _render_queue(tv_mode: bool, responsible: str) -> None:
             }
             </style>
             """, unsafe_allow_html=True)
-        active = session.scalars(select(Order).where(
-            (Order.status != "Finalizado") | (Order.finished_at.is_not(None) & (Order.finished_at >= datetime.combine(today, datetime.min.time())))
-        ).order_by(Order.created_at)).all()
+        active = session.scalars(
+            select(Order)
+            .where(Order.status != "Finalizado")
+            .order_by(Order.created_at)
+        ).all()
         recent = session.scalars(select(Order).where(Order.created_at >= now - timedelta(days=30),
                                                     Order.started_at.is_not(None), Order.ready_at.is_not(None))).all()
         production_times = [(order.ready_at - order.started_at).total_seconds() / 60 for order in recent]
         delivery_times = [(order.delivered_at - order.ready_at).total_seconds() / 60 for order in recent
                           if order.delivered_at]
         average_minutes = sum(production_times) / len(production_times) if production_times else 15
-        delivered_today = [order for order in active if order.finished_at and order.finished_at.date() == today]
+        delivered_today = session.scalars(
+            select(Order).where(
+                Order.status == "Finalizado",
+                func.date(Order.finished_at) == today,
+            )
+        ).all()
         total_times = [(order.finished_at - order.created_at).total_seconds() / 60 for order in delivered_today]
         st.caption("Atualização automática a cada 5 s")
         metrics = st.columns(4)
@@ -65,9 +72,9 @@ def _render_queue(tv_mode: bool, responsible: str) -> None:
             ("Recebido", ["Recebido"]),
             ("Em preparo", ["Em preparo"]),
             ("Pronto", ["Pronto"]),
-            ("Finalizado", ["Entregue", "Finalizado"]),
+            ("Entregue", ["Entregue"]),
         ]
-        columns = st.columns(4)
+        columns = st.columns(len(buckets))
         for column, (label, statuses) in zip(columns, buckets):
             board_orders = [order for order in active if order.status in statuses]
             with column:
@@ -111,7 +118,7 @@ def _render_queue(tv_mode: bool, responsible: str) -> None:
         session.close()
 
 
-def render(session) -> None:
+def render(_session) -> None:
     tv_mode = persistent_toggle("Modo TV", key="kitchen.tv_mode", default=False)
     if tv_mode:
         st.title("Modo TV · Fila da cozinha")

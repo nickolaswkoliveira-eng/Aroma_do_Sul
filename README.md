@@ -34,7 +34,11 @@ Os módulos de Financeiro, DRE e Inteligência são controlados por flags em `co
 
 ## Navegação
 
-A tela inicial prioriza tarefas operacionais e mostra apenas os estados permitidos pelo perfil ativo. Indicadores financeiros e a visão geral ficam na área de Gestão, acessível conforme as permissões. A projeção de fluxo de caixa fica no módulo Financeiro; Relatórios mantém consultas históricas e análises por período. A navegação usa menus no desktop e um seletor compacto em telas menores. O tema e a marca visual do Café Aroma do Sul são configurados em `.streamlit/config.toml` e `components/layout.py`.
+A tela inicial prioriza tarefas operacionais e mostra apenas os estados permitidos pelo perfil ativo; o menu superior não repete os atalhos de operação já disponíveis no início. Indicadores financeiros e a visão geral ficam na área de Gestão, acessível conforme as permissões. A projeção de fluxo de caixa fica no módulo Financeiro; Relatórios mantém consultas históricas e análises por período.
+
+Quando um pedido é finalizado na cozinha, o sistema abre uma comanda vinculada ao cliente. A área **Comandas** reúne as contas abertas; é possível adicionar pedidos à comanda (cada novo lote volta à fila da cozinha) e fechar/cobrar quando todos os pedidos estiverem finalizados e houver caixa aberto. O recebimento é registrado como entrada no caixa com a forma de pagamento escolhida. Em telas menores, o seletor de navegação continua oferecendo os módulos autorizados.
+
+O tema compartilhado define cores escuras de alto contraste para valores, rótulos, botões, campos e mensagens, incluindo os indicadores da página inicial e da visão geral. O tema e a marca visual do Café Aroma do Sul são configurados em `.streamlit/config.toml` e `components/layout.py`.
 
 ## Estrutura
 

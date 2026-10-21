@@ -1,5 +1,5 @@
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from html import escape
 from pathlib import Path
 
@@ -52,13 +52,21 @@ def configure_page() -> None:
     .home-status-label { color: var(--muted); font-size: .78rem; }
     .home-status-value { color: var(--ink); font-size: 1rem; font-weight: 650; margin-top: .25rem; }
     [data-testid="stMetric"] { background: transparent; border: 0; padding: .35rem 0; }
-    [data-testid="stMetricLabel"], [data-testid="stCaption"], [data-testid="stWidgetLabel"] { color: var(--muted); }
+    [data-testid="stMetricLabel"], [data-testid="stCaption"], [data-testid="stWidgetLabel"] { color: var(--muted) !important; }
+    [data-testid="stMetricValue"], [data-testid="stMetricDelta"] { color: var(--ink) !important; }
+    [data-testid="stAlert"] [data-testid="stMarkdownContainer"] { color: var(--ink) !important; }
     div.stButton > button { border-radius: 8px; min-height: 2.5rem; border-color: var(--line); background-color: var(--surface) !important; color: var(--ink) !important; transition: border-color .16s ease, background-color .16s ease; }
+    div.stButton > button:not([kind="primary"]) { background-color: var(--surface) !important; border-color: var(--line) !important; color: var(--ink) !important; }
     div.stButton > button[kind="primary"] { background-color: var(--espresso) !important; border-color: var(--espresso); color: #FFFFFF !important; }
     div.stButton > button:hover { border-color: var(--accent); color: var(--espresso) !important; background: #F2EBE2 !important; }
     div.stButton > button[kind="primary"]:hover { background: var(--accent) !important; color: #FFFFFF !important; }
-    [data-testid="stSelectbox"] [data-baseweb="select"] > div { background-color: var(--surface); border-color: var(--line); color: var(--ink); }
-    [data-testid="stSelectbox"] [data-baseweb="select"] input { color: var(--ink); }
+    [data-testid="stSelectbox"] [data-baseweb="select"] > div { background-color: var(--surface); border-color: var(--line); color: var(--ink) !important; }
+    [data-testid="stSelectbox"] [data-baseweb="select"] input { color: var(--ink) !important; }
+    [data-testid="stWidgetLabel"] p, label, legend { color: var(--ink) !important; }
+    div[data-baseweb="input"] input, div[data-baseweb="textarea"] textarea,
+    div[data-baseweb="input"] input::placeholder, div[data-baseweb="textarea"] textarea::placeholder {
+      color: var(--ink) !important; background-color: var(--surface);
+    }
     div[data-testid="stForm"] { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; }
     .eyebrow { color: var(--accent); text-transform: uppercase; font-size: .7rem; letter-spacing: .08em; font-weight: 700; }
     .brand-lockup { display: flex; align-items: center; gap: .8rem; min-height: 64px; color: var(--espresso); font: 650 1.15rem/1.2 system-ui, sans-serif; letter-spacing: -.02em; }
@@ -73,8 +81,8 @@ def configure_page() -> None:
     .status-pill { color: var(--ink); font-weight: 650; }
     h1, h2, h3 { font-family: system-ui, sans-serif; color: var(--espresso); letter-spacing: -.025em; }
     h1 { margin-top: .1rem; margin-bottom: .2rem; }
-    [data-testid="stTabs"] button[role="tab"] { color: var(--muted); }
-    [data-testid="stTabs"] button[aria-selected="true"] { color: var(--espresso); border-bottom-color: var(--accent); }
+    [data-testid="stTab"] { color: var(--muted) !important; }
+    [data-testid="stTab"][aria-selected="true"] { color: var(--espresso) !important; border-bottom-color: var(--accent) !important; }
     [data-testid="stDataFrame"] *, [data-testid="stTable"] * { color: var(--ink); }
     a { color: #464FEB; text-decoration: none; }
     a:hover { text-decoration: underline; }
@@ -133,9 +141,11 @@ def brand_lockup() -> None:
 
 
 def top_navigation(groups: dict[str, list[tuple[str, str]]], user_name: str,
-                   on_navigate: Callable[[str], None], on_logout: Callable[[], None] | None = None) -> None:
+                   on_navigate: Callable[[str], None],
+                   on_logout: Callable[[], None] | None = None,
+                   mobile_destinations: Sequence[str] = ()) -> None:
     st.session_state.mobile_nav_select = "Menu"
-    labels = ("Operação", "Gestão", "Inteligência", "Configurações")
+    labels = ("Gestão", "Inteligência", "Configurações")
     visible_labels = [label for label in labels if groups.get(label)]
     with st.container(key="top_navigation"):
         columns = st.columns([2.8, .8, *([1.15] * len(visible_labels)), 1.35],
@@ -157,9 +167,10 @@ def top_navigation(groups: dict[str, list[tuple[str, str]]], user_name: str,
                 st.caption("Sessão ativa")
                 if on_logout and st.button("Sair", key="logout_button", width="stretch"):
                     on_logout()
-    destinations = list(dict.fromkeys(
-        destination for items in groups.values() for _, destination in items
-    ))
+    destinations = list(dict.fromkeys((
+        *(destination for items in groups.values() for _, destination in items),
+        *mobile_destinations,
+    )))
     with st.container(key="top_navigation_mobile"):
         brand_column, profile_column = st.columns([3, 1], vertical_alignment="center")
         with brand_column:
