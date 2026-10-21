@@ -17,7 +17,7 @@ def configure_page() -> None:
     <style>
     :root {
       --ink: #30251D;
-      --muted: #75685B;
+      --muted: #5F5146;
       --beige: #E8DCCB;
       --line: #E5D9CA;
       --accent: #76583F;
@@ -26,6 +26,7 @@ def configure_page() -> None:
       --canvas: #F7F4EF;
       --espresso: #4A3527;
     }
+    html, body, [data-testid="stAppViewContainer"] { font-family: Inter, "Segoe UI", Arial, sans-serif; }
     .block-container { width: min(100%, 1440px); padding: 1rem clamp(1rem, 3vw, 2.5rem) 2.5rem; }
     [data-testid="stSidebar"] { display: none; }
     header[data-testid="stHeader"] { display: none !important; }
@@ -51,7 +52,7 @@ def configure_page() -> None:
     .home-status-label { color: var(--muted); font-size: .78rem; }
     .home-status-value { color: var(--ink); font-size: 1rem; font-weight: 650; margin-top: .25rem; }
     [data-testid="stMetric"] { background: transparent; border: 0; padding: .35rem 0; }
-    [data-testid="stMetricLabel"] { color: var(--muted); }
+    [data-testid="stMetricLabel"], [data-testid="stCaption"], [data-testid="stWidgetLabel"] { color: var(--muted); }
     div.stButton > button { border-radius: 8px; min-height: 2.5rem; border-color: var(--line); background-color: var(--surface) !important; color: var(--ink) !important; transition: border-color .16s ease, background-color .16s ease; }
     div.stButton > button[kind="primary"] { background-color: var(--espresso) !important; border-color: var(--espresso); color: #FFFFFF !important; }
     div.stButton > button:hover { border-color: var(--accent); color: var(--espresso) !important; background: #F2EBE2 !important; }
@@ -74,6 +75,10 @@ def configure_page() -> None:
     h1 { margin-top: .1rem; margin-bottom: .2rem; }
     [data-testid="stTabs"] button[role="tab"] { color: var(--muted); }
     [data-testid="stTabs"] button[aria-selected="true"] { color: var(--espresso); border-bottom-color: var(--accent); }
+    [data-testid="stDataFrame"] *, [data-testid="stTable"] * { color: var(--ink); }
+    a { color: #464FEB; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
     div[class*="st-key-module_card_"] { min-height: 176px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; transition: border-color .16s ease, background-color .16s ease; }
     div[class*="st-key-module_card_"]:hover { background: #FCFAF7; border-color: var(--accent); }
     .module-icon { font-size: 1.5rem; line-height: 1; margin-bottom: .7rem; }
@@ -110,6 +115,8 @@ def configure_page() -> None:
     @media (max-width: 900px) {
       div[class*="st-key-top_navigation"] { display: none; }
       div[class*="st-key-top_navigation_mobile"] { display: block; border-bottom: 1px solid var(--line); margin-bottom: 1.4rem; padding-bottom: .65rem; }
+      div[class*="st-key-home_summary_metrics"] [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+      div[class*="st-key-home_summary_metrics"] [data-testid="stColumn"] { flex: 1 1 calc(50% - 1rem) !important; }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -199,7 +206,9 @@ def section_heading(title: str, description: str = "") -> None:
         st.caption(description)
 
 
-def module_card(icon: str, title: str, description: str, key: str, indicators: list[str] | None = None) -> bool:
+def module_card(icon: str, title: str, description: str, key: str, indicators: list[str] | None = None,
+                selected: bool = False, button_label: str = "Entrar →",
+                button_key: str | None = None) -> bool:
     with st.container(key=f"module_card_{key}"):
         indicators_markup = "".join(f'<span class="module-indicator">{escape(item)}</span>' for item in indicators or [])
         st.markdown(
@@ -208,4 +217,5 @@ def module_card(icon: str, title: str, description: str, key: str, indicators: l
             f'<div class="module-indicators">{indicators_markup}</div>',
             unsafe_allow_html=True,
         )
-        return st.button("Entrar →", key=f"open_module_{key}", width="stretch")
+        return st.button(button_label, key=button_key or f"open_module_{key}", width="stretch",
+                         type="primary" if selected else "secondary")

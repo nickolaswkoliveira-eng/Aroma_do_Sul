@@ -5,14 +5,13 @@ from components.layout import configure_page, top_navigation
 from components.qr_code import render_qr
 from config import (
     APP_NAME, MODULO_DRE, MODULO_FINANCEIRO, MODULO_INTELIGENCIA,
-    MODULO_NFE, MODULO_USUARIOS, MODULO_WHATSAPP, MODO_HOMOLOGACAO,
+    MODULO_USUARIOS, MODO_DEMONSTRACAO, MODO_HOMOLOGACAO,
 )
 from database.connection import get_session, init_database
 from models.entities import Role, User
 from pages import cash, dashboard, finance, intelligence, inventory, kitchen, orders, reports, settings, users
-from services.auth import authenticate, can_access, create_user
-from services.seed import seed_demo_data
-from utils.session_state import initialize_app_state, persistent_text_input
+from services.auth import authenticate, can_access, create_user, seed_access_control
+from utils.session_state import RESET_SESSION_ON_RERUN, initialize_app_state, persistent_text_input
 
 
 MODULES = {
@@ -72,7 +71,7 @@ def _navigate(destination: str) -> None:
 
 def _logout() -> None:
     st.session_state.pop("user_id", None)
-    st.session_state.active_page = "Início"
+    st.session_state[RESET_SESSION_ON_RERUN] = True
     st.query_params.clear()
     st.rerun()
 
@@ -83,7 +82,9 @@ def main() -> None:
     init_database()
     session = get_session()
     try:
-        seed_demo_data(session)
+        if MODO_DEMONSTRACAO:
+            seed_access_control(session)
+            st.warning("AMBIENTE DE DEMONSTRAÇÃO · Os dados são isolados em banco separado.", icon="🧪")
         current_user = None
         if not MODO_HOMOLOGACAO:
             user_id = st.session_state.get("user_id")

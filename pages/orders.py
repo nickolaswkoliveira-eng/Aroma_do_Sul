@@ -1,4 +1,3 @@
-from datetime import date
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import streamlit as st
@@ -6,6 +5,7 @@ import streamlit as st
 from components.layout import metric_card, section_heading
 from models.entities import Category, Order, OrderItem, Product, Stock
 from services.domain import create_order
+from utils.clock import local_today
 from utils.formatting import currency, date_time
 from utils.session_state import (
     persist_value, persistent_number_input, persistent_selectbox, persistent_text_input,
@@ -20,7 +20,7 @@ def render(session: Session) -> None:
     active_orders = session.scalar(select(func.count(Order.id)).where(Order.status.in_(("Recebido", "Em preparo")))) or 0
     waiting_orders = session.scalar(select(func.count(Order.id)).where(Order.status == "Recebido")) or 0
     completed_today = session.scalar(select(func.count(Order.id)).where(
-        Order.status == "Finalizado", func.date(Order.finished_at) == date.today())) or 0
+        Order.status == "Finalizado", func.date(Order.finished_at) == local_today())) or 0
     status_cols = st.columns(3)
     with status_cols[0]: metric_card("Pedidos ativos", str(active_orders), "Em atendimento")
     with status_cols[1]: metric_card("Aguardando preparo", str(waiting_orders), "Na fila da cozinha")

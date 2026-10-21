@@ -1,14 +1,17 @@
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from plotly.graph_objects import Figure
 
-from utils.palette import BACKGROUND, BEIGE_DARK, BEIGE_LIGHT, CHART_COLORS
+from utils.palette import BACKGROUND, BEIGE_DARK, CHART_COLORS
 
 WEEKDAYS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
 MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
 
 
-def format_sales_series(orders: list, period: str) -> tuple[list[str], list[float]]:
+def format_sales_series(orders: list, period: str, start: date | None = None,
+                        end: date | None = None) -> tuple[list[str], list[float]]:
+    if not orders:
+        return [], []
     totals: dict[str, float] = {}
     for order in orders:
         created = order.created_at
@@ -24,7 +27,19 @@ def format_sales_series(orders: list, period: str) -> tuple[list[str], list[floa
             label = created.strftime("%d/%m")
         totals[label] = totals.get(label, 0.0) + order.total
 
-    if period == "Dia":
+    if start is not None and end is not None and period == "Dia":
+        labels = [f"{hour:02d}:00" for hour in range(24)]
+    elif start is not None and end is not None and period == "Semana":
+        labels = [WEEKDAYS[index] for index in range(start.weekday(), end.weekday() + 1)]
+    elif start is not None and end is not None and period == "Ano":
+        labels = [f"{MONTHS[month - 1]}/{start.year}" for month in range(1, end.month + 1)]
+    elif start is not None and end is not None and period in ("Mês", "Personalizado"):
+        date_format = "%d/%m/%Y" if period == "Personalizado" else "%d/%m"
+        labels = [
+            (start + timedelta(days=offset)).strftime(date_format)
+            for offset in range((end - start).days + 1)
+        ]
+    elif period == "Dia":
         labels = sorted(totals, key=lambda value: int(value[:2]))
     elif period == "Semana":
         labels = WEEKDAYS

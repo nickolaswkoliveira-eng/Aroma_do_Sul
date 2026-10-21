@@ -1,5 +1,5 @@
-from datetime import date, datetime, timedelta
-from sqlalchemy import func, select
+from datetime import timedelta
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 import pandas as pd
 import plotly.express as px
@@ -7,8 +7,9 @@ import streamlit as st
 
 from components.layout import metric_card, section_heading
 from components.charts import apply_chart_theme
-from models.entities import Order, Payable, Receivable
-from services.domain import audit, projected_cash, update_overdue_payables
+from models.entities import CashSession, Payable, Receivable
+from services.domain import audit, cash_balance, projected_cash, update_overdue_payables
+from utils.clock import local_now, local_today
 from utils.formatting import currency, date_only
 from utils.session_state import (
     persistent_date_input, persistent_number_input, persistent_select_slider,
@@ -22,12 +23,19 @@ def render(session: Session) -> None:
     section_heading("Financeiro", "Contas a pagar, receitas previstas e projeções")
     tabs = st.tabs(["Visão geral", "Contas a pagar", "Receitas", "Fluxo projetado"])
     with tabs[0]:
+        today = local_today()
         open_payables = session.scalars(select(Payable).where(Payable.status.in_(("Aberto", "Vencido")))).all()
         open_receivables = session.scalars(select(Receivable).where(Receivable.status == "Aberto")).all()
-        cols = st.columns(3)
+        due_next_week = [row for row in open_payables
+                         if today <= row.due_date <= today + timedelta(days=7)]
+        cash = session.scalar(select(CashSession).where(CashSession.is_open.is_(True)))
+        cols = st.columns(4)
         with cols[0]: metric_card("A pagar", currency(sum(row.amount for row in open_payables)), f"{len(open_payables)} contas em aberto/vencidas")
         with cols[1]: metric_card("A receber", currency(sum(row.amount for row in open_receivables)), f"{len(open_receivables)} receitas previstas")
-        with cols[2]: metric_card("Vencidas", str(sum(row.status == "Vencido" for row in open_payables)), "Contas que exigem atenção")
+        with cols[2]: metric_card("Vencidas", currency(sum(row.amount for row in open_payables if row.status == "Vencido")), f"{sum(row.status == 'Vencido' for row in open_payables)} contas em atraso")
+        with cols[3]: metric_card("Vence em 7 dias", currency(sum(row.amount for row in due_next_week)), f"{len(due_next_week)} compromissos próximos")
+        if cash:
+            st.info(f"Caixa do turno aberto: saldo atual de {currency(cash_balance(session, cash))}.")
         if open_payables:
             st.dataframe([{"Descrição": row.description, "Categoria": row.category, "Vencimento": date_only(row.due_date),
                            "Valor": currency(row.amount), "Status": row.status} for row in open_payables], width="stretch", hide_index=True)
@@ -42,9 +50,9 @@ def render(session: Session) -> None:
         with amount_column:
             amount = persistent_number_input("Valor", key="finance.payable.amount", default=0.01, min_value=0.01, step=10.0)
         with competence_column:
-            competence = persistent_date_input("Competência", key="finance.payable.competence", default=date.today(), format="DD/MM/YYYY")
+            competence = persistent_date_input("Competência", key="finance.payable.competence", default=local_today(), format="DD/MM/YYYY")
         with due_column:
-            due = persistent_date_input("Vencimento", key="finance.payable.due", default=date.today() + timedelta(days=7), format="DD/MM/YYYY")
+            due = persistent_date_input("Vencimento", key="finance.payable.due", default=local_today() + timedelta(days=7), format="DD/MM/YYYY")
         if st.button("Cadastrar conta", type="primary", key="finance.payable.submit"):
             session.add(Payable(description=description, category=category, amount=amount, competence=competence, due_date=due))
             audit(session, "Conta a pagar cadastrada", f"{description} · R$ {amount:.2f}",
@@ -59,7 +67,7 @@ def render(session: Session) -> None:
             cols[1].write(f"{date_only(row.due_date)} · {currency(row.amount)} · {row.status}")
             if row.status != "Pago" and cols[2].button("Marcar pago", key=f"paid_{row.id}"):
                 row.status = "Pago"
-                row.paid_at = datetime.now()
+                row.paid_at = local_now()
                 audit(session, "Conta a pagar quitada", row.description,
                       st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
                 session.commit()
@@ -73,7 +81,7 @@ def render(session: Session) -> None:
                                              min_value=0.01, step=10.0)
         with due_column:
             due = persistent_date_input("Data prevista", key="finance.receivable.due",
-                                        default=date.today() + timedelta(days=7), format="DD/MM/YYYY")
+                                        default=local_today() + timedelta(days=7), format="DD/MM/YYYY")
         if st.button("Cadastrar receita", type="primary", key="finance.receivable.submit"):
             session.add(Receivable(description=description, amount=amount, due_date=due))
             audit(session, "Receita prevista cadastrada", f"{description} · R$ {amount:.2f}",
@@ -88,7 +96,7 @@ def render(session: Session) -> None:
             cols[1].write(f"{date_only(row.due_date)} · {currency(row.amount)} · {row.status}")
             if row.status == "Aberto" and cols[2].button("Recebido", key=f"received_{row.id}"):
                 row.status = "Recebido"
-                row.received_at = datetime.now()
+                row.received_at = local_now()
                 audit(session, "Receita recebida", row.description,
                       st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
                 session.commit()
@@ -104,4 +112,4 @@ def render(session: Session) -> None:
             figure.update_layout(margin=dict(l=0, r=0, t=12, b=0), height=350, xaxis={"type": "category"})
             apply_chart_theme(figure)
             st.plotly_chart(figure, width="stretch")
-        st.caption("Projeção considera caixa aberto, vendas registradas hoje e contas com vencimento no período. Não substitui conciliação bancária.")
+        st.caption("Projeção considera o saldo do caixa e contas a pagar/receber cadastradas com vencimento no período. Vendas não são incorporadas automaticamente; não substitui conciliação bancária.")

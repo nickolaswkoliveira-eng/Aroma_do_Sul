@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import timedelta
 from html import escape
 from collections.abc import Callable, Sequence
 from sqlalchemy import func, select
@@ -7,13 +7,14 @@ import streamlit as st
 
 from components.layout import section_heading
 from models.entities import CashSession, Order, OrderItem, Payable, Product, Stock
-from services.domain import cash_balance, cmv_for_period
+from services.domain import cash_balance, cmv_for_period, purchase_recommendations, stock_level
+from utils.clock import local_now, local_today
 from utils.formatting import currency
 
 
 def render_operational_home(session: Session, user_name: str, available_pages: Sequence[str],
                             on_navigate: Callable[[str], None]) -> None:
-    hour = datetime.now().hour
+    hour = local_now().hour
     greeting = "Bom dia" if hour < 12 else "Boa tarde" if hour < 18 else "Boa noite"
     first_name = user_name.split()[0] if user_name and user_name != "Homologação" else "Dener"
     st.markdown(
@@ -38,34 +39,61 @@ def render_operational_home(session: Session, user_name: str, available_pages: S
                     if st.button(label, key=f"home_action_{destination}", type=button_type, width="stretch"):
                         on_navigate(destination)
 
-    status_items: list[tuple[str, str]] = []
+    today = local_today()
+    summary = []
+    if "Visão geral" in available_pages or "Relatórios" in available_pages:
+        revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
+            func.date(Order.created_at) == today)) or 0
+        summary.append(("Vendas hoje", currency(float(revenue)), "Total registrado em pedidos"))
+    active_orders = session.scalar(select(func.count(Order.id)).where(
+        Order.status.in_(("Recebido", "Em preparo")))) or 0
     if any(page in available_pages for page in ("Pedidos", "Cozinha")):
-        active_orders = session.scalar(select(func.count(Order.id)).where(
-            Order.status.in_(("Recebido", "Em preparo")))) or 0
-        status_items.append(("Pedidos em andamento", str(active_orders)))
+        summary.append(("Pedidos em andamento", str(active_orders), "Recebidos ou em preparo"))
     if "Caixa" in available_pages:
-        cash_is_open = session.scalar(select(CashSession.id).where(CashSession.is_open.is_(True)).limit(1))
-        status_items.append(("Caixa", "Aberto" if cash_is_open else "Fechado"))
+        cash = session.scalar(select(CashSession).where(CashSession.is_open.is_(True)))
+        summary.append(("Caixa", currency(cash_balance(session, cash)) if cash else "Fechado",
+                        "Saldo atual do turno" if cash else "Nenhum turno aberto"))
+    stock_recommendations = []
+    critical = 0
     if "Estoque" in available_pages:
         stock_rows = session.execute(select(Stock.quantity, Stock.minimum_quantity)).all()
-        critical = sum(quantity <= minimum * .2 for quantity, minimum in stock_rows)
-        status_items.append(("Alertas de estoque", str(critical)))
-    if status_items:
-        st.markdown('<div class="home-status"><div class="home-eyebrow">Status da operação</div></div>',
-                    unsafe_allow_html=True)
-        status_columns = st.columns(len(status_items))
-        for column, (label, value) in zip(status_columns, status_items):
-            with column:
-                st.markdown(
-                    f'<div class="home-status-label">{escape(label)}</div>'
-                    f'<div class="home-status-value">{escape(value)}</div>',
-                    unsafe_allow_html=True,
-                )
+        critical = sum(stock_level(quantity, minimum) in ("Zerado", "Crítico")
+                       for quantity, minimum in stock_rows)
+        summary.append(("Estoque crítico", str(critical), "Itens zerados ou até 20% do mínimo"))
+        stock_recommendations = [item for item in purchase_recommendations(session)
+                                 if item["needs_action"]]
+    if summary:
+        st.subheader("Resumo rápido")
+        with st.container(key="home_summary_metrics"):
+            summary_columns = st.columns(len(summary))
+            for column, (label, value, help_text) in zip(summary_columns, summary):
+                with column:
+                    st.metric(label, value, help=help_text)
 
+    attention_items = []
+    if critical:
+        attention_items.append(f"{critical} item(ns) de estoque exigem atenção.")
+    if not session.scalar(select(CashSession.id).where(CashSession.is_open.is_(True)).limit(1)) and "Caixa" in available_pages:
+        attention_items.append("Caixa fechado.")
+    if active_orders:
+        attention_items.append(f"{active_orders} pedido(s) aguardam andamento.")
+    if attention_items:
+        st.subheader("Atenção agora")
+        for item in attention_items:
+            st.write(f"• {item}")
+    if stock_recommendations and "Estoque" in available_pages:
+        recommendation = stock_recommendations[0]
+        product = recommendation["product"]
+        st.info(
+            f"Ação recomendada: comprar {recommendation['suggested_quantity']:g} "
+            f"{product.unit} de {product.name}. Abra Estoque para ver detalhes."
+        )
+        if st.button("Ver recomendações de estoque", key="home.stock_recommendations"):
+            on_navigate("Estoque")
 
 def render(session: Session) -> None:
     section_heading("Visão geral", "Indicadores gerenciais do negócio")
-    today = date.today()
+    today = local_today()
     yesterday = today - timedelta(days=1)
     revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(func.date(Order.created_at) == today)) or 0
     yesterday_revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(func.date(Order.created_at) == yesterday)) or 0
@@ -77,9 +105,9 @@ def render(session: Session) -> None:
                                                                              func.date(Order.finished_at) == yesterday)) or 0
     cash = session.scalar(select(CashSession).where(CashSession.is_open.is_(True)))
     stock_rows = session.execute(select(Stock.quantity, Stock.minimum_quantity)).all()
-    critical = sum(quantity <= minimum * .2 for quantity, minimum in stock_rows)
-    attention = sum(quantity > 0 and minimum > 0 and minimum * .2 < quantity < minimum * .5
-                    for quantity, minimum in stock_rows)
+    stock_levels = [stock_level(quantity, minimum) for quantity, minimum in stock_rows]
+    critical = sum(level in ("Zerado", "Crítico") for level in stock_levels)
+    attention = sum(level == "Atenção" for level in stock_levels)
     today_orders = session.scalars(select(Order).where(func.date(Order.created_at) == today)).all()
     top_product = session.execute(select(Product.name, func.sum(OrderItem.quantity).label("units"))
                                   .join(OrderItem, OrderItem.product_id == Product.id)
@@ -140,7 +168,7 @@ def render(session: Session) -> None:
     average_production = (sum((order.ready_at - order.started_at).total_seconds() / 60
                               for order in recent_production) / len(recent_production)) if recent_production else 15
     slow_orders = [order for order in today_orders if order.status == "Em preparo" and order.started_at
-                   and (datetime.now() - order.started_at).total_seconds() / 60 > average_production * 1.5]
+                   and (local_now() - order.started_at).total_seconds() / 60 > average_production * 1.5]
     due_soon = session.scalar(select(func.count(Payable.id)).where(
         Payable.status.in_(("Aberto", "Vencido")),
         Payable.due_date <= today + timedelta(days=7))) or 0
@@ -175,8 +203,9 @@ def module_indicators(session: Session, module_name: str) -> list[str]:
     if module_name == "Estoque":
         product_count = session.scalar(select(func.count(Product.id)).where(Product.active.is_(True))) or 0
         rows = session.execute(select(Stock.quantity, Stock.minimum_quantity)).all()
-        critical = sum(quantity <= minimum * .2 for quantity, minimum in rows)
-        attention = sum(minimum > 0 and minimum * .2 < quantity < minimum * .5 for quantity, minimum in rows)
+        levels = [stock_level(quantity, minimum) for quantity, minimum in rows]
+        critical = sum(level in ("Zerado", "Crítico") for level in levels)
+        attention = sum(level == "Atenção" for level in levels)
         return [f"{product_count} produtos", f"{critical} críticos", f"{attention} atenção"]
     if module_name == "Caixa":
         cash = session.scalar(select(CashSession).where(CashSession.is_open.is_(True)))

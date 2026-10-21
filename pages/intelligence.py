@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import timedelta
 from html import escape
 from itertools import combinations
 from sqlalchemy import func, select
@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session
 import streamlit as st
 
 from components.layout import section_heading
-from models.entities import Order, OrderItem, Payable, Product, RecipeItem, Stock, StockMovement
+from models.entities import Order, OrderItem, Payable, Product, RecipeItem
 from services.domain import cmv_for_period, purchase_recommendations
+from utils.clock import local_today
 
 
 CATEGORY_ICONS = {"Estoque": "📦", "Vendas": "📈", "Financeiro": "💰", "Operação": "⚙️"}
@@ -19,7 +20,7 @@ def _collect_insights(session: Session) -> dict[str, list[dict[str, str]]]:
     def add(category: str, what: str, impact: str, action: str) -> None:
         insights[category].append({"what": what, "impact": impact, "action": action})
 
-    today = date.today()
+    today = local_today()
     recent_start = today - timedelta(days=30)
     orders_today = session.scalars(select(Order).where(func.date(Order.created_at) == today)).all()
     revenue_today = sum(order.total for order in orders_today)
@@ -71,19 +72,11 @@ def _collect_insights(session: Session) -> dict[str, list[dict[str, str]]]:
                 "A combinação tem recorrência observada no histórico.",
                 "Avaliar a oferta dos dois itens como combo.")
 
-    for suggestion in purchase_recommendations(session):
-        if not suggestion["needs_action"]:
-            continue
-        product = suggestion["product"]
-        days_left = suggestion["days_remaining"]
-        if suggestion["stock"].quantity <= 0:
-            what = f"{product.name} está sem saldo disponível."
-            impact = "A venda pode ser bloqueada por falta de insumo."
-        else:
-            what = f"{product.name} tem aproximadamente {days_left:.0f} dia(s) de cobertura." if days_left is not None else f"{product.name} está abaixo do estoque mínimo."
-            impact = f"Consumo médio: {suggestion['daily_average']:.2f} {product.unit}/dia."
-        action = f"Comprar {suggestion['suggested_quantity']:g} {product.unit}. {suggestion['reason']}"
-        add("Estoque", what, impact, action)
+    stock_actions = [item for item in purchase_recommendations(session) if item["needs_action"]]
+    if stock_actions:
+        add("Estoque", f"{len(stock_actions)} item(ns) exigem atenção no estoque.",
+            "Há risco de falta ou cobertura abaixo do nível recomendado.",
+            "Consulte as recomendações detalhadas no módulo Estoque.")
 
     due_soon = session.scalars(select(Payable).where(
         Payable.status == "Aberto", Payable.due_date >= today,
@@ -140,5 +133,10 @@ def render(session: Session) -> None:
                     f'<div><strong>Impacto</strong><br>{escape(message["impact"])}</div>'
                     f'<div><strong>Ação sugerida</strong><br>{escape(message["action"])}</div></div>',
                             unsafe_allow_html=True)
+        if category == "Estoque" and st.button("Abrir recomendações no Estoque",
+                                               key="intelligence.open_inventory"):
+            st.session_state.active_page = "Estoque"
+            st.query_params["pagina"] = "Estoque"
+            st.rerun()
     if not any(insights.values()):
         st.info("Ainda não há dados suficientes para gerar insights. Registre vendas e movimentações para iniciar as análises.")

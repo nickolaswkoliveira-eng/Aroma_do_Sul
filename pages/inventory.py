@@ -1,4 +1,3 @@
-from datetime import date, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import pandas as pd
@@ -7,7 +6,7 @@ from pandas.io.formats.style import Styler
 
 from components.layout import metric_card, section_heading
 from models.entities import Category, Ingredient, Product, RecipeItem, Stock, StockMovement
-from services.domain import audit, move_stock, purchase_recommendations
+from services.domain import audit, move_stock, purchase_recommendations, stock_level
 from utils.formatting import currency, date_time
 from utils.session_state import (
     persistent_checkbox, persistent_number_input, persistent_selectbox,
@@ -23,14 +22,14 @@ def render(session: Session) -> None:
     critical_count = 0
     inventory_value = 0.0
     for product, stock in rows:
-        ratio = stock.quantity / stock.minimum_quantity if stock.minimum_quantity else 1
-        critical_count += int(stock.quantity <= 0 or (stock.minimum_quantity > 0 and ratio < .2))
-        attention_count += int(stock.quantity > 0 and stock.minimum_quantity > 0 and .2 <= ratio < .5)
+        level = stock_level(stock.quantity, stock.minimum_quantity)
+        critical_count += int(level in ("Zerado", "Crítico"))
+        attention_count += int(level == "Atenção")
         inventory_value += stock.quantity * product.cost_price
     kpis = st.columns(4)
     with kpis[0]: metric_card("Produtos ativos", str(active_count), "No catálogo", prominent=True)
-    with kpis[1]: metric_card("Em atenção", str(attention_count), "Entre 20% e 50% do mínimo", prominent=True)
-    with kpis[2]: metric_card("Críticos", str(critical_count), "Abaixo de 20% ou zerados", prominent=True)
+    with kpis[1]: metric_card("Em atenção", str(attention_count), "Acima de 20% e abaixo de 50% do mínimo", prominent=True)
+    with kpis[2]: metric_card("Críticos", str(critical_count), "Até 20% do mínimo ou zerados", prominent=True)
     with kpis[3]: metric_card("Valor em estoque", currency(inventory_value), "Custo cadastrado × saldo", prominent=True)
     recommendations = purchase_recommendations(session)
     urgent_actions = [item for item in recommendations if item["needs_action"]]
@@ -61,8 +60,7 @@ def render(session: Session) -> None:
         if rows:
             data = []
             for product, stock in rows:
-                ratio = stock.quantity / stock.minimum_quantity if stock.minimum_quantity else 1
-                level = "Zerado" if stock.quantity <= 0 else "Crítico" if ratio < .2 else "Atenção" if ratio < .5 else "Adequado"
+                level = stock_level(stock.quantity, stock.minimum_quantity)
                 data.append({"Código": product.code, "Produto": product.name, "Estoque": f"{stock.quantity:g} {product.unit}",
                              "Mínimo": f"{stock.minimum_quantity:g} {product.unit}", "Custo": currency(product.cost_price), "Nível": level})
             query = persistent_text_input("Pesquisar estoque", key="inventory.search", placeholder="Produto ou código")
@@ -81,8 +79,9 @@ def render(session: Session) -> None:
                 return "background-color: #E8F3EA; color: #315D3B; font-weight: 700"
             styled_table: Styler = table.style.apply(row_style, axis=1).map(status_style, subset=["Nível"])
             st.dataframe(styled_table, width="stretch", height=440, hide_index=True)
-            zero_count = sum(stock.quantity <= 0 for _, stock in rows)
-            critical_count = sum(stock.quantity > 0 and stock.minimum_quantity > 0 and stock.quantity / stock.minimum_quantity < .2
+            zero_count = sum(stock_level(stock.quantity, stock.minimum_quantity) == "Zerado"
+                             for _, stock in rows)
+            critical_count = sum(stock_level(stock.quantity, stock.minimum_quantity) == "Crítico"
                                  for _, stock in rows)
             if zero_count:
                 st.error(f"{zero_count} item(ns) sem saldo. Confira antes de aceitar novos pedidos.")

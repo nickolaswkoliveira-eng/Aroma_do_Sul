@@ -2,9 +2,12 @@ import streamlit as st
 
 
 PERSISTENT_WIDGETS = "_persistent_widget_values"
+RESET_SESSION_ON_RERUN = "_reset_session_on_rerun"
 
 
 def initialize_app_state() -> None:
+    if st.session_state.pop(RESET_SESSION_ON_RERUN, False):
+        st.session_state.clear()
     if PERSISTENT_WIDGETS not in st.session_state:
         st.session_state[PERSISTENT_WIDGETS] = {}
     defaults = {

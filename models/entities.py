@@ -1,8 +1,9 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database.connection import Base
+from utils.clock import local_now
 
 
 class Role(Base):
@@ -34,7 +35,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), default="")
     role_id: Mapped[int | None] = mapped_column(ForeignKey("perfis.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
 
 
 class Category(Base):
@@ -70,7 +71,7 @@ class Stock(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("produtos.id"), unique=True)
     quantity: Mapped[float] = mapped_column(Float, default=0)
     minimum_quantity: Mapped[float] = mapped_column(Float, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now)
 
 
 class RecipeItem(Base):
@@ -89,7 +90,7 @@ class StockMovement(Base):
     quantity: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(220), default="")
     responsible: Mapped[str] = mapped_column(String(80), default="SISTEMA_HOMOLOGACAO")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
 
 
 class Customer(Base):
@@ -107,7 +108,7 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(30), default="Recebido", index=True)
     notes: Mapped[str] = mapped_column(Text, default="")
     total: Mapped[float] = mapped_column(Float, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ready_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -130,7 +131,7 @@ class CashSession(Base):
     operator: Mapped[str] = mapped_column(String(80), default="SISTEMA_HOMOLOGACAO")
     opening_balance: Mapped[float] = mapped_column(Float, default=0)
     closing_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
-    opened_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    opened_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_open: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
@@ -143,7 +144,7 @@ class CashMovement(Base):
     method: Mapped[str] = mapped_column(String(30), default="Dinheiro")
     amount: Mapped[float] = mapped_column(Float)
     description: Mapped[str] = mapped_column(String(220), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
 
 
 class Payable(Base):
@@ -183,7 +184,7 @@ class Audit(Base):
     responsible: Mapped[str] = mapped_column(String(80), default="SISTEMA_HOMOLOGACAO")
     action: Mapped[str] = mapped_column(String(220))
     details: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
 
 
 class LoginAudit(Base):
@@ -191,4 +192,14 @@ class LoginAudit(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(80))
     success: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+
+
+class DemoRecord(Base):
+    __tablename__ = "registros_demo"
+    __table_args__ = (UniqueConstraint("entity", "record_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity: Mapped[str] = mapped_column(String(80), index=True)
+    record_id: Mapped[int] = mapped_column(Integer)
+    demo: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

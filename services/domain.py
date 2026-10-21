@@ -1,4 +1,5 @@
-from datetime import date, datetime, timedelta
+from collections.abc import Iterator
+from datetime import date, timedelta
 from math import ceil
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from models.entities import (
     Audit, CashMovement, CashSession, Customer, Order, OrderItem, Payable,
     Product, Receivable, RecipeItem, Stock, StockMovement,
 )
+from utils.clock import local_now, local_today
 
 
 STATUSES = ("Recebido", "Em preparo", "Pronto", "Entregue", "Finalizado")
@@ -14,6 +16,18 @@ STATUSES = ("Recebido", "Em preparo", "Pronto", "Entregue", "Finalizado")
 
 def audit(session: Session, action: str, details: str = "", responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
     session.add(Audit(responsible=responsible, action=action, details=details))
+
+
+def stock_level(quantity: float, minimum: float) -> str:
+    if quantity <= 0:
+        return "Zerado"
+    if minimum > 0:
+        ratio = quantity / minimum
+        if ratio <= .2:
+            return "Crítico"
+        if ratio < .5:
+            return "Atenção"
+    return "Adequado"
 
 
 def _stock_requirements(session: Session, product_quantities: dict[int, int]) -> dict[int, float]:
@@ -84,19 +98,19 @@ def update_order_status(session: Session, order: Order, new_status: str,
             product_quantities[item.product_id] = product_quantities.get(item.product_id, 0) + item.quantity
         required_stock = _stock_requirements(session, product_quantities)
         _validate_stock(session, required_stock)
-        order.started_at = datetime.now()
+        order.started_at = local_now()
         for ingredient_id, required in required_stock.items():
             stock = session.scalar(select(Stock).where(Stock.product_id == ingredient_id))
             stock.quantity -= required
-            stock.updated_at = datetime.now()
+            stock.updated_at = local_now()
             session.add(StockMovement(product_id=ingredient_id, movement_type="Saída", quantity=required,
                                       reason=f"Baixa do pedido #{order.id}", responsible=responsible))
     if new_status == "Pronto" and order.ready_at is None:
-        order.ready_at = datetime.now()
+        order.ready_at = local_now()
     if new_status == "Entregue" and order.delivered_at is None:
-        order.delivered_at = datetime.now()
+        order.delivered_at = local_now()
     if new_status == "Finalizado" and order.finished_at is None:
-        order.finished_at = datetime.now()
+        order.finished_at = local_now()
     order.status = new_status
     audit(session, "Status do pedido alterado", f"Pedido #{order.id}: {new_status}", responsible)
     session.commit()
@@ -121,7 +135,7 @@ def move_stock(session: Session, product_id: int, movement_type: str, quantity: 
         stock.quantity = quantity
     else:
         raise ValueError("Tipo de movimentação inválido.")
-    stock.updated_at = datetime.now()
+    stock.updated_at = local_now()
     session.add(StockMovement(product_id=product_id, movement_type=movement_type, quantity=quantity, reason=reason,
                               responsible=responsible))
     audit(session, "Movimentação de estoque", f"Produto #{product_id} | {movement_type} {quantity:g} | {reason}", responsible)
@@ -160,7 +174,7 @@ def add_cash_movement(session: Session, cash: CashSession, movement_type: str, m
 def close_cash(session: Session, cash: CashSession) -> float:
     balance = cash_balance(session, cash)
     cash.closing_balance = balance
-    cash.closed_at = datetime.now()
+    cash.closed_at = local_now()
     cash.is_open = False
     audit(session, "Fechamento de caixa", f"Saldo final R$ {balance:.2f}", cash.operator)
     session.commit()
@@ -168,7 +182,7 @@ def close_cash(session: Session, cash: CashSession) -> float:
 
 
 def update_overdue_payables(session: Session) -> None:
-    today = date.today()
+    today = local_today()
     entries = session.scalars(select(Payable).where(Payable.status == "Aberto", Payable.due_date < today)).all()
     for entry in entries:
         entry.status = "Vencido"
@@ -177,7 +191,7 @@ def update_overdue_payables(session: Session) -> None:
 
 
 def purchase_recommendations(session: Session, coverage_days: int = 14) -> list[dict]:
-    today = date.today()
+    today = local_today()
     current_start = today - timedelta(days=6)
     previous_start = today - timedelta(days=13)
     previous_end = current_start
@@ -244,6 +258,15 @@ def cmv_for_period(session: Session, start: date, end: date) -> dict[str, float]
     if not items:
         return {"revenue": 0.0, "cost": 0.0, "ratio": 0.0}
     product_ids = {item.product_id for item in items}
+    unit_costs = product_unit_costs(session, product_ids)
+    revenue = sum(item.quantity * item.unit_price for item in items)
+    cost = sum(item.quantity * unit_costs.get(item.product_id, 0) for item in items)
+    return {"revenue": revenue, "cost": cost, "ratio": cost / revenue if revenue else 0.0}
+
+
+def product_unit_costs(session: Session, product_ids: set[int]) -> dict[int, float]:
+    if not product_ids:
+        return {}
     products = {product.id: product for product in session.scalars(
         select(Product).where(Product.id.in_(product_ids))).all()}
     recipes = session.scalars(select(RecipeItem).where(RecipeItem.product_id.in_(product_ids))).all()
@@ -254,19 +277,15 @@ def cmv_for_period(session: Session, start: date, end: date) -> dict[str, float]
         ingredient_ids.add(recipe.ingredient_id)
     ingredient_costs = {product.id: product.cost_price for product in session.scalars(
         select(Product).where(Product.id.in_(ingredient_ids))).all()} if ingredient_ids else {}
-    unit_costs = {}
+    unit_costs = {product_id: product.cost_price for product_id, product in products.items()}
     for product_id, product_recipes in recipes_by_product.items():
         unit_costs[product_id] = sum(recipe.quantity * ingredient_costs.get(recipe.ingredient_id, 0)
                                      for recipe in product_recipes)
-    for product_id, product in products.items():
-        unit_costs.setdefault(product_id, product.cost_price)
-    revenue = sum(item.quantity * item.unit_price for item in items)
-    cost = sum(item.quantity * unit_costs.get(item.product_id, 0) for item in items)
-    return {"revenue": revenue, "cost": cost, "ratio": cost / revenue if revenue else 0.0}
+    return unit_costs
 
 
-def projected_cash(session: Session, days: int) -> list[dict]:
-    today = date.today()
+def projected_cash(session: Session, days: int) -> Iterator[dict[str, date | float]]:
+    today = local_today()
     latest_cash = session.scalar(select(CashSession).order_by(CashSession.opened_at.desc()).limit(1))
     start_balance = cash_balance(session, latest_cash) if latest_cash and latest_cash.is_open else (latest_cash.closing_balance or 0 if latest_cash else 0)
     balance = float(start_balance)

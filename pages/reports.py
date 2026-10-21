@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import pandas as pd
@@ -8,12 +8,13 @@ import streamlit as st
 from components.layout import metric_card, module_card, section_heading
 from components.charts import apply_chart_theme, format_sales_series
 from models.entities import CashMovement, CashSession, Order, OrderItem, Payable, Product, Receivable, Stock, StockMovement
-from services.domain import projected_cash
+from services.domain import cmv_for_period, product_unit_costs
+from utils.clock import local_today
 from utils.formatting import currency, date_only, date_time
 from utils.palette import CHART_COLORS, CHART_SCALE
-from utils.session_state import persistent_date_input, persistent_selectbox, persistent_select_slider
+from utils.session_state import persistent_date_input, persistent_selectbox
 
-REPORTS = ["Vendas", "Estoque", "Financeiro", "DRE", "Produtos", "Horários", "Caixa", "Fluxo de caixa"]
+REPORTS = ["Vendas", "Estoque", "Financeiro", "DRE", "Produtos", "Horários", "Caixa"]
 REPORT_CARDS = {
     "Vendas": ("📊", "Faturamento, ticket médio e pedidos por período."),
     "Estoque": ("📦", "Posição, consumo médio e cobertura de estoque."),
@@ -22,7 +23,6 @@ REPORT_CARDS = {
     "Produtos": ("🍔", "Ranking, margem e participação de vendas."),
     "Horários": ("🕒", "Distribuição de pedidos por dia e hora."),
     "Caixa": ("🧾", "Turnos, entradas e saídas registrados."),
-    "Fluxo de caixa": ("↗", "Projeção de saldo para os próximos períodos."),
 }
 
 
@@ -46,12 +46,11 @@ def render(session: Session) -> None:
     for index, report in enumerate(available):
         icon, description = REPORT_CARDS[report]
         with cols[index % 4]:
-            with st.container(key=f"module_card_report_{report.lower().replace(' ', '_')}"):
-                st.markdown(f'<div class="module-icon">{icon}</div><div class="module-title">{report}</div><div class="module-description">{description}</div>', unsafe_allow_html=True)
-                if st.button("Abrir relatório →", key=f"report_{report}", width="stretch",
-                             type="primary" if selected == report else "secondary"):
-                    st.session_state.report_section = report
-                    st.rerun()
+            key = f"report_{report.lower().replace(' ', '_')}"
+            if module_card(icon, report, description, key, selected=selected == report,
+                           button_label="Abrir relatório →", button_key=f"report_{report}"):
+                st.session_state.report_section = report
+                st.rerun()
     selected = st.session_state.get("report_section", "Vendas")
     st.divider()
     if selected == "Vendas":
@@ -68,14 +67,12 @@ def render(session: Session) -> None:
         _finance_report(session)
     elif selected == "Caixa":
         _cash_report(session)
-    elif selected == "Fluxo de caixa":
-        _cashflow_report(session)
 
 
 def _period() -> tuple[date, date]:
     preset = persistent_selectbox("Período", ["Dia", "Semana", "Mês", "Ano", "Personalizado"],
                                   key="reports.period", default="Mês")
-    today = date.today()
+    today = local_today()
     if preset == "Dia":
         return today, today
     if preset == "Semana":
@@ -92,19 +89,17 @@ def _period() -> tuple[date, date]:
 def _sales_report(session: Session, basic: bool = False) -> None:
     start, end = _period()
     orders = _sales(session, start, end)
-    order_ids = [order.id for order in orders]
-    items = session.scalars(select(OrderItem).where(OrderItem.order_id.in_(order_ids))).all() if order_ids else []
-    costs = sum(item.quantity * session.get(Product, item.product_id).cost_price for item in items)
+    costs = cmv_for_period(session, start, end)["cost"]
     revenue = sum(order.total for order in orders)
     average = revenue / len(orders) if orders else 0
     cols = st.columns(3 if basic else 4)
     with cols[0]: metric_card("Faturamento", currency(revenue), f"{start:%d/%m} a {end:%d/%m/%Y}")
     if not basic:
-        with cols[1]: metric_card("Lucro bruto estimado", currency(revenue - costs), "Receita menos custo cadastrado")
+        with cols[1]: metric_card("Lucro bruto estimado", currency(revenue - costs), "Receita menos custo da ficha técnica quando disponível")
     with cols[1 if basic else 2]: metric_card("Ticket médio", currency(average), "Por pedido registrado")
     with cols[2 if basic else 3]: metric_card("Pedidos", str(len(orders)), "No período")
     period = st.session_state.get("reports.period", "Mês")
-    labels, values = format_sales_series(orders, period)
+    labels, values = format_sales_series(orders, period, start, end)
     frame = pd.DataFrame({"Período": labels, "Faturamento": values})
     if not frame.empty:
         chart = px.line(frame, x="Período", y="Faturamento", markers=True, color_discrete_sequence=CHART_COLORS)
@@ -130,7 +125,7 @@ def _sales_report(session: Session, basic: bool = False) -> None:
 
 def _product_report(session: Session) -> None:
     start, end = _period()
-    rows = session.execute(select(Product.name, func.sum(OrderItem.quantity).label("units"),
+    rows = session.execute(select(Product.id, Product.name, func.sum(OrderItem.quantity).label("units"),
                                  func.sum(OrderItem.quantity * OrderItem.unit_price).label("revenue"))
                            .join(OrderItem, OrderItem.product_id == Product.id).join(Order, Order.id == OrderItem.order_id)
                            .where(func.date(Order.created_at) >= start, func.date(Order.created_at) <= end)
@@ -138,8 +133,9 @@ def _product_report(session: Session) -> None:
     if not rows:
         st.info("Sem itens vendidos no período.")
         return
+    unit_costs = product_unit_costs(session, {row.id for row in rows})
     frame = pd.DataFrame([{"Produto": row.name, "Unidades": row.units, "Faturamento": row.revenue,
-                           "Margem": (row.revenue - row.units * session.scalar(select(Product.cost_price).where(Product.name == row.name))) / row.revenue if row.revenue else 0}
+                           "Margem": (row.revenue - row.units * unit_costs.get(row.id, 0)) / row.revenue if row.revenue else 0}
                           for row in rows])
     frame["Pareto %"] = frame["Faturamento"].cumsum() / frame["Faturamento"].sum() * 100
     first, second = st.columns(2)
@@ -167,7 +163,7 @@ def _stock_report(session: Session) -> None:
     for product, stock in rows:
         consumed = session.scalar(select(func.coalesce(func.sum(StockMovement.quantity), 0)).where(
             StockMovement.product_id == product.id, StockMovement.movement_type.in_(("Saída", "Perda")),
-            func.date(StockMovement.created_at) >= date.today() - timedelta(days=30))) or 0
+            func.date(StockMovement.created_at) >= local_today() - timedelta(days=30))) or 0
         avg = float(consumed) / 30
         output.append({"Produto": product.name, "Saldo": stock.quantity, "Mínimo": stock.minimum_quantity,
                        "Consumo/dia": round(avg, 2), "Dias de cobertura": round(stock.quantity / avg, 1) if avg else None,
@@ -234,10 +230,8 @@ def _cash_report(session: Session) -> None:
 def _dre_report(session: Session) -> None:
     start, end = _period()
     orders = _sales(session, start, end)
-    order_ids = [order.id for order in orders]
-    items = session.scalars(select(OrderItem).where(OrderItem.order_id.in_(order_ids))).all() if order_ids else []
     gross = sum(order.total for order in orders)
-    costs = sum(item.quantity * session.get(Product, item.product_id).cost_price for item in items)
+    costs = cmv_for_period(session, start, end)["cost"]
     expenses = session.scalars(select(Payable).where(Payable.status == "Pago", Payable.due_date >= start, Payable.due_date <= end)).all()
     expense_total = sum(item.amount for item in expenses)
     lines = [("Receita bruta", gross), ("(-) Descontos", 0), ("Receita líquida", gross),
@@ -253,19 +247,6 @@ def _dre_report(session: Session) -> None:
         apply_chart_theme(fig)
         st.plotly_chart(fig, width="stretch")
     st.caption("Descontos e impostos estão zerados até que sejam parametrizados. DRE gerencial estimada com custos e despesas cadastrados.")
-
-
-def _cashflow_report(session: Session) -> None:
-    days = persistent_select_slider("Projeção", [7, 15, 30, 60], key="finance.projection_days",
-                                    default=30, format_func=lambda value: f"{value} dias")
-    frame = pd.DataFrame(list(projected_cash(session, days)))
-    if not frame.empty:
-        st.metric("Saldo ao final", currency(float(frame.iloc[-1]["Saldo projetado"])))
-        frame["Data"] = frame["Data"].map(lambda value: value.strftime("%d/%m"))
-        fig = px.area(frame, x="Data", y="Saldo projetado", color_discrete_sequence=CHART_COLORS)
-        fig.update_layout(height=380, xaxis={"type": "category"})
-        apply_chart_theme(fig)
-        st.plotly_chart(fig, width="stretch")
 
 
 def _peak_report(session: Session) -> None:
@@ -289,5 +270,3 @@ def _peak_report(session: Session) -> None:
                       coloraxis_colorbar_title="Pedidos")
     apply_chart_theme(fig)
     st.plotly_chart(fig, width="stretch")
-
-
