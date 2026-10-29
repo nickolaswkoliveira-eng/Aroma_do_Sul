@@ -58,7 +58,7 @@ def _login(session):
             user = authenticate(session, username, password)
             if user:
                 st.session_state.user_id = user.id
-                st.rerun()
+                return True
             st.error("Usuário ou senha inválidos, ou usuário bloqueado.")
         except ValueError as error:
             st.error(str(error))
@@ -71,14 +71,12 @@ def _navigate(destination: str) -> None:
         st.query_params.clear()
     else:
         st.query_params["pagina"] = destination
-    st.rerun()
 
 
 def _logout() -> None:
     st.session_state.pop("user_id", None)
     st.session_state[RESET_SESSION_ON_RERUN] = True
     st.query_params.clear()
-    st.rerun()
 
 
 def main() -> None:
@@ -87,7 +85,9 @@ def main() -> None:
     try:
         init_database()
         session = get_session()
-        seed_access_control(session)
+        if not st.session_state.get("_acl_seeded"):
+            seed_access_control(session)
+            st.session_state["_acl_seeded"] = True
     except (SQLAlchemyError, OSError, ValueError) as error:
         st.error("Banco de dados indisponível ou protegido contra uma configuração insegura.")
         st.caption("As operações foram interrompidas para evitar perda ou gravação duplicada.")
@@ -102,8 +102,12 @@ def main() -> None:
             current_user = session.get(User, user_id) if user_id else None
             if current_user is None or not current_user.active:
                 st.session_state.pop("user_id", None)
-                _login(session)
-                return
+                if not _login(session):
+                    return
+                user_id = st.session_state.get("user_id")
+                current_user = session.get(User, user_id) if user_id else None
+                if current_user is None or not current_user.active:
+                    return
         if MODO_HOMOLOGACAO:
             st.session_state.current_role = "ADMINISTRADOR"
             st.session_state.acting_user = "SISTEMA_HOMOLOGACAO"
