@@ -28,40 +28,43 @@ MODULES = {
 
 
 def _login(session):
-    st.title(f"Acesso ao {APP_NAME}")
-    users_count = session.scalar(select(User.id).limit(1))
-    if not users_count:
-        st.subheader("Configuração inicial")
-        st.caption("Crie a conta de administrador para iniciar o ambiente de produção.")
-        username = persistent_text_input("Usuário", key="auth.first_admin.username")
-        full_name = persistent_text_input("Nome completo", key="auth.first_admin.full_name")
+    login_slot = st.empty()
+    with login_slot.container():
+        st.title(f"Acesso ao {APP_NAME}")
+        users_count = session.scalar(select(User.id).limit(1))
+        if not users_count:
+            st.subheader("Configuração inicial")
+            st.caption("Crie a conta de administrador para iniciar o ambiente de produção.")
+            username = persistent_text_input("Usuário", key="auth.first_admin.username")
+            full_name = persistent_text_input("Nome completo", key="auth.first_admin.full_name")
+            password = st.text_input("Senha", type="password")
+            confirmation = st.text_input("Confirmar senha", type="password")
+            if st.button("Criar administrador", type="primary", key="auth.first_admin.submit"):
+                if not username or not full_name or len(password) < 12:
+                    st.error("Preencha usuário e nome; a senha precisa ter ao menos 12 caracteres.")
+                elif password != confirmation:
+                    st.error("As senhas não conferem.")
+                else:
+                    try:
+                        create_user(session, username, full_name, password, "ADMINISTRADOR")
+                        st.success("Administrador criado. Faça login para continuar.")
+                        st.rerun()
+                    except Exception as error:
+                        session.rollback()
+                        st.error(f"Não foi possível criar a conta: {error}")
+            return False
+        username = persistent_text_input("Usuário", key="auth.username")
         password = st.text_input("Senha", type="password")
-        confirmation = st.text_input("Confirmar senha", type="password")
-        if st.button("Criar administrador", type="primary", key="auth.first_admin.submit"):
-            if not username or not full_name or len(password) < 12:
-                st.error("Preencha usuário e nome; a senha precisa ter ao menos 12 caracteres.")
-            elif password != confirmation:
-                st.error("As senhas não conferem.")
-            else:
-                try:
-                    create_user(session, username, full_name, password, "ADMINISTRADOR")
-                    st.success("Administrador criado. Faça login para continuar.")
-                    st.rerun()
-                except Exception as error:
-                    session.rollback()
-                    st.error(f"Não foi possível criar a conta: {error}")
-        return False
-    username = persistent_text_input("Usuário", key="auth.username")
-    password = st.text_input("Senha", type="password")
-    if st.button("Entrar", type="primary", width="stretch", key="auth.login.submit"):
-        try:
-            user = authenticate(session, username, password)
-            if user:
-                st.session_state.user_id = user.id
-                return True
-            st.error("Usuário ou senha inválidos, ou usuário bloqueado.")
-        except ValueError as error:
-            st.error(str(error))
+        if st.button("Entrar", type="primary", width="stretch", key="auth.login.submit"):
+            try:
+                user = authenticate(session, username, password)
+                if user:
+                    st.session_state.user_id = user.id
+                    login_slot.empty()
+                    return True
+                st.error("Usuário ou senha inválidos, ou usuário bloqueado.")
+            except ValueError as error:
+                st.error(str(error))
     return False
 
 
