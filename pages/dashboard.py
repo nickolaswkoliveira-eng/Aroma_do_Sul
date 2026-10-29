@@ -40,6 +40,11 @@ def render_operational_home(session: Session, user_name: str, available_pages: S
                     if st.button(label, key=f"home_action_{destination}", type=button_type, width="stretch"):
                         on_navigate(destination)
 
+    _render_operational_home_summary(session, available_pages, on_navigate)
+
+
+def _render_operational_home_summary(session: Session, available_pages: Sequence[str],
+                                     on_navigate: Callable[[str], None]) -> None:
     today = local_today()
     summary = []
     if "Visão geral" in available_pages or "Relatórios" in available_pages:
@@ -86,7 +91,7 @@ def render_operational_home(session: Session, user_name: str, available_pages: S
         recommendation = stock_recommendations[0]
         product = recommendation["product"]
         st.info(
-            f"Ação recomendada: comprar {recommendation['suggested_quantity']:g} "
+            f"Ação recomendada: comprar {recommendation['suggested_quantity']:.0f} "
             f"{product.unit} de {product.name}. Abra Estoque para ver detalhes."
         )
         if st.button("Ver recomendações de estoque", key="home.stock_recommendations"):

@@ -16,3 +16,8 @@ def time_only(value: datetime | None) -> str:
 
 def date_only(value: date | datetime | None) -> str:
     return value.strftime("%d/%m/%Y") if value else "-"
+
+
+def quantity(value: float, decimals: int = 3) -> str:
+    rendered = f"{float(value):.{decimals}f}".rstrip("0").rstrip(".")
+    return rendered or "0"

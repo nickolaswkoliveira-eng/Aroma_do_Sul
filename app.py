@@ -11,7 +11,12 @@ from config import (
 from database.connection import get_session, init_database
 from models.entities import Role, User
 from pages import cash, commands, dashboard, finance, intelligence, inventory, kitchen, orders, reports, settings, users
-from services.auth import authenticate, can_access, create_user, seed_access_control
+from services.auth import (
+    authenticate, can_access, create_user, issue_user_session,
+    restore_user_from_session_token,
+    revoke_user_session, seed_access_control,
+)
+from utils.auth_cookie import clear_session_cookie, read_session_cookie, write_session_cookie
 from utils.session_state import RESET_SESSION_ON_RERUN, initialize_app_state, persistent_text_input
 
 
@@ -60,6 +65,13 @@ def _login(session):
                 user = authenticate(session, username, password)
                 if user:
                     st.session_state.user_id = user.id
+                    headers = getattr(st.context, "headers", None)
+                    user_agent = ""
+                    if headers is not None:
+                        user_agent = headers.get("User-Agent", "") or headers.get("user-agent", "")
+                    session_token = issue_user_session(session, user, user_agent)
+                    st.session_state.auth_session_token = session_token
+                    write_session_cookie(session_token)
                     login_slot.empty()
                     return True
                 st.error("Usuário ou senha inválidos, ou usuário bloqueado.")
@@ -77,7 +89,15 @@ def _navigate(destination: str) -> None:
 
 
 def _logout() -> None:
+    session_token = str(st.session_state.get("auth_session_token", "")).strip()
+    if not session_token:
+        session_token = read_session_cookie()
+    if session_token:
+        with get_session() as logout_session:
+            revoke_user_session(logout_session, session_token)
+    clear_session_cookie()
     st.session_state.pop("user_id", None)
+    st.session_state.pop("auth_session_token", None)
     st.session_state[RESET_SESSION_ON_RERUN] = True
     st.query_params.clear()
 
@@ -103,14 +123,30 @@ def main() -> None:
         if not MODO_HOMOLOGACAO:
             user_id = st.session_state.get("user_id")
             current_user = session.get(User, user_id) if user_id else None
+            if current_user is None:
+                cookie_token = read_session_cookie()
+                if cookie_token:
+                    restored = restore_user_from_session_token(session, cookie_token)
+                    if restored is not None:
+                        st.session_state.user_id = restored.id
+                        st.session_state.auth_session_token = cookie_token
+                        current_user = restored
+                        write_session_cookie(cookie_token)
+                    else:
+                        clear_session_cookie()
             if current_user is None or not current_user.active:
                 st.session_state.pop("user_id", None)
+                st.session_state.pop("auth_session_token", None)
+                clear_session_cookie()
                 if not _login(session):
                     return
                 user_id = st.session_state.get("user_id")
                 current_user = session.get(User, user_id) if user_id else None
                 if current_user is None or not current_user.active:
                     return
+            else:
+                if st.session_state.get("auth_session_token"):
+                    write_session_cookie(str(st.session_state["auth_session_token"]))
         if MODO_HOMOLOGACAO:
             st.session_state.current_role = "ADMINISTRADOR"
             st.session_state.acting_user = "SISTEMA_HOMOLOGACAO"

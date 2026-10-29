@@ -5,9 +5,9 @@ import streamlit as st
 from pandas.io.formats.style import Styler
 
 from components.layout import metric_card, section_heading
-from models.entities import Category, Ingredient, Product, RecipeItem, Stock, StockMovement
+from models.entities import Category, Product, RecipeItem, Stock, StockMovement
 from services.domain import audit, move_stock, purchase_recommendations, stock_level
-from utils.formatting import currency, date_time
+from utils.formatting import currency, date_time, quantity
 from utils.session_state import (
     persistent_checkbox, persistent_number_input, persistent_selectbox,
     persistent_text_input,
@@ -45,7 +45,7 @@ def render(session: Session) -> None:
                 with st.container(border=True):
                     st.markdown(f"**{urgency} Comprar {product.name}**")
                     st.caption(days_text)
-                    st.write(f"Sugestão: {item['suggested_quantity']:g} {product.unit}")
+                    st.write(f"Sugestão: {quantity(item['suggested_quantity'])} {product.unit}")
                     st.caption(item["reason"])
     else:
         adequate = next((item for item in recommendations if item["days_remaining"] is not None
@@ -61,8 +61,8 @@ def render(session: Session) -> None:
             data = []
             for product, stock in rows:
                 level = stock_level(stock.quantity, stock.minimum_quantity)
-                data.append({"Código": product.code, "Produto": product.name, "Estoque": f"{stock.quantity:g} {product.unit}",
-                             "Mínimo": f"{stock.minimum_quantity:g} {product.unit}", "Custo": currency(product.cost_price), "Nível": level})
+                data.append({"Código": product.code, "Produto": product.name, "Estoque": f"{quantity(stock.quantity)} {product.unit}",
+                             "Mínimo": f"{quantity(stock.minimum_quantity)} {product.unit}", "Custo": currency(product.cost_price), "Nível": level})
             query = persistent_text_input("Pesquisar estoque", key="inventory.search", placeholder="Produto ou código")
             table = pd.DataFrame(data)
             if query:
@@ -93,7 +93,7 @@ def render(session: Session) -> None:
         if movements:
             with st.expander("Histórico recente de movimentações"):
                 st.dataframe([{"Data e hora": date_time(movement.created_at), "Produto": session.get(Product, movement.product_id).name,
-                               "Tipo": movement.movement_type, "Quantidade": movement.quantity, "Motivo": movement.reason}
+                               "Tipo": movement.movement_type, "Quantidade": quantity(movement.quantity), "Motivo": movement.reason}
                               for movement in movements], width="stretch", hide_index=True)
     with tabs[1]:
         products = session.scalars(select(Product).order_by(Product.name)).all()
@@ -233,8 +233,7 @@ def render(session: Session) -> None:
                     st.rerun()
     with tabs[3]:
         sellable = session.scalars(select(Product).where(Product.sale_price > 0).order_by(Product.name)).all()
-        ingredient_products = session.scalars(select(Product).join(Ingredient, Ingredient.product_id == Product.id)
-                                              .order_by(Product.name)).all()
+        ingredient_products = session.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.name)).all()
         if not sellable or not ingredient_products:
             st.info("Cadastre produtos vendáveis e insumos antes de montar fichas técnicas.")
         else:
@@ -268,8 +267,10 @@ def render(session: Session) -> None:
             for recipe in recipes:
                 sold_product = session.get(Product, recipe.product_id)
                 ingredient = session.get(Product, recipe.ingredient_id)
+                if sold_product is None or ingredient is None:
+                    continue
                 first, second = st.columns([5, 1])
-                first.write(f"{sold_product.name}: {recipe.quantity:g} {ingredient.unit} {ingredient.name}")
+                first.write(f"{sold_product.name}: {quantity(recipe.quantity)} {ingredient.unit} {ingredient.name}")
                 if second.button("Remover", key=f"remove_recipe_{recipe.id}"):
                     audit(session, "Item removido da ficha técnica", f"{sold_product.name} · {ingredient.name}",
                           st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
@@ -287,9 +288,9 @@ def render(session: Session) -> None:
                 with columns[index % 2]:
                     with st.container(border=True):
                         st.markdown(f"### {product.name}")
-                        st.caption(f"Saldo: {item['stock'].quantity:g} {product.unit} · {days_text}")
+                        st.caption(f"Saldo: {quantity(item['stock'].quantity)} {product.unit} · {days_text}")
                         st.write(f"Consumo médio: {item['daily_average']:.2f} {product.unit}/dia")
-                        st.markdown(f"**Sugestão: comprar {item['suggested_quantity']:g} {product.unit}**")
+                        st.markdown(f"**Sugestão: comprar {quantity(item['suggested_quantity'])} {product.unit}**")
                         st.caption(item["reason"])
         else:
             st.success("Sem sugestão de compra imediata. Estoque acima da cobertura recomendada.")

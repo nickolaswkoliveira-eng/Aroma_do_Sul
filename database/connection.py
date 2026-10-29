@@ -5,6 +5,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from config import (
+    APP_ENV, IS_PRODUCTION,
     BACKUP_DIRECTORY, BACKUP_RETENTION_COUNT, DATABASE_URL, DEFAULT_DATABASE_URL,
     DEFAULT_DEMO_DATABASE_URL, DEMO_DATABASE_URL, MODO_DEMONSTRACAO,
 )
@@ -49,6 +50,20 @@ def _default_database_path_guard(database_url: str, default_url: str) -> None:
 
 _default_database_path_guard(DATABASE_URL, DEFAULT_DATABASE_URL)
 _default_database_path_guard(DEMO_DATABASE_URL, DEFAULT_DEMO_DATABASE_URL)
+
+if IS_PRODUCTION:
+    operational_url = make_url(DATABASE_URL)
+    if operational_url.drivername.startswith("sqlite"):
+        raise ValueError(
+            f"APP_ENV={APP_ENV} bloqueia SQLite no banco operacional. "
+            "Configure DATABASE_URL com PostgreSQL/Supabase."
+        )
+    demo_runtime_url = make_url(DEMO_DATABASE_URL)
+    if demo_runtime_url.drivername.startswith("sqlite") and MODO_DEMONSTRACAO:
+        raise ValueError(
+            "Modo de demonstração com SQLite está bloqueado em produção. "
+            "Desative MODO_DEMONSTRACAO ou configure DEMO_DATABASE_URL em PostgreSQL."
+        )
 
 demo_url = make_url(DEMO_DATABASE_URL)
 if (

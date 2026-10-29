@@ -224,6 +224,18 @@ class BackupRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
 
 
+class UserSession(Base):
+    __tablename__ = "sessoes_usuario"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("usuarios.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    user_agent: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class DemoRecord(Base):
     __tablename__ = "registros_demo"
     __table_args__ = (UniqueConstraint("entity", "record_id"),)

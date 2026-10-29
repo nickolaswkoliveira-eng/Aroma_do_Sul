@@ -1,10 +1,13 @@
 from datetime import timedelta
+import hashlib
+import secrets
 
 from passlib.hash import pbkdf2_sha256
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from models.entities import Audit, LoginAudit, Permission, Role, RolePermission, User
+from config import AUTH_SESSION_TTL_DAYS
+from models.entities import Audit, LoginAudit, Permission, Role, RolePermission, User, UserSession
 from utils.clock import local_now
 
 
@@ -15,6 +18,7 @@ ROLE_PERMISSIONS = {
     "ATENDENTE": ["orders", "orders:create", "orders:update"],
     "COZINHA": ["kitchen:view", "orders:status"],
 }
+MAX_ACTIVE_SESSIONS_PER_USER = 4
 
 
 def seed_access_control(session: Session) -> None:
@@ -82,6 +86,71 @@ def authenticate(session: Session, username: str, password: str) -> User | None:
                       action="Login realizado" if success else "Tentativa de login inválida"))
     session.commit()
     return user if success else None
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def issue_user_session(session: Session, user: User, user_agent: str = "") -> str:
+    token = secrets.token_urlsafe(48)
+    now = local_now()
+    token_hash = _token_hash(token)
+    session.add(UserSession(
+        user_id=user.id,
+        token_hash=token_hash,
+        user_agent=user_agent[:200],
+        created_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=AUTH_SESSION_TTL_DAYS),
+    ))
+    active_sessions = session.scalars(
+        select(UserSession)
+        .where(
+            UserSession.user_id == user.id,
+            UserSession.revoked_at.is_(None),
+            UserSession.expires_at >= now,
+        )
+        .order_by(UserSession.created_at.desc())
+    ).all()
+    for stale in active_sessions[MAX_ACTIVE_SESSIONS_PER_USER:]:
+        stale.revoked_at = now
+    session.commit()
+    return token
+
+
+def restore_user_from_session_token(session: Session, token: str) -> User | None:
+    token = token.strip()
+    if not token:
+        return None
+    now = local_now()
+    session_row = session.scalar(
+        select(UserSession).where(UserSession.token_hash == _token_hash(token))
+    )
+    if session_row is None or session_row.revoked_at is not None or session_row.expires_at < now:
+        return None
+    user = session.get(User, session_row.user_id)
+    if user is None or not user.active:
+        session_row.revoked_at = now
+        session.commit()
+        return None
+    session_row.last_seen_at = now
+    session_row.expires_at = now + timedelta(days=AUTH_SESSION_TTL_DAYS)
+    session.commit()
+    return user
+
+
+def revoke_user_session(session: Session, token: str) -> None:
+    token = token.strip()
+    if not token:
+        return
+    session_row = session.scalar(
+        select(UserSession).where(UserSession.token_hash == _token_hash(token))
+    )
+    if session_row is None or session_row.revoked_at is not None:
+        return
+    session_row.revoked_at = local_now()
+    session.commit()
 
 
 def create_user(session: Session, username: str, full_name: str, password: str, role_name: str,

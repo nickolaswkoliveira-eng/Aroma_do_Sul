@@ -1,5 +1,5 @@
 from datetime import timedelta
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 import pandas as pd
@@ -8,7 +8,7 @@ import streamlit as st
 
 from components.layout import metric_card, section_heading
 from components.charts import apply_chart_theme
-from models.entities import CashSession, Payable, Receivable
+from models.entities import CashSession, Order, Payable, Receivable
 from services.domain import (
     add_payable, add_receivable, audit, cash_balance, mark_payable_paid,
     mark_receivable_received, projected_cash, update_overdue_payables,
@@ -40,6 +40,30 @@ def render(session: Session) -> None:
         with cols[3]: metric_card("Vence em 7 dias", currency(sum(row.amount for row in due_next_week)), f"{len(due_next_week)} compromissos próximos")
         if cash:
             st.info(f"Caixa do turno aberto: saldo atual de {currency(cash_balance(session, cash))}.")
+        revenue_rows = session.execute(
+            select(
+                func.date(Order.created_at).label("dia"),
+                func.coalesce(func.sum(Order.total), 0).label("receita"),
+            )
+            .where(
+                Order.status != "Cancelado",
+                func.date(Order.created_at) >= today - timedelta(days=29),
+                func.date(Order.created_at) <= today,
+            )
+            .group_by(func.date(Order.created_at))
+            .order_by(func.date(Order.created_at))
+        ).all()
+        if revenue_rows:
+            by_day = {str(row.dia): float(row.receita) for row in revenue_rows}
+            labels = [(today - timedelta(days=offset)).isoformat() for offset in range(29, -1, -1)]
+            frame = pd.DataFrame({
+                "Dia": labels,
+                "Receita": [by_day.get(label, 0.0) for label in labels],
+            })
+            figure = px.line(frame, x="Dia", y="Receita", markers=True, color_discrete_sequence=CHART_COLORS)
+            figure.update_layout(height=280, margin=dict(l=0, r=0, t=8, b=0), xaxis={"type": "category"})
+            apply_chart_theme(figure)
+            st.plotly_chart(figure, width="stretch")
         if open_payables:
             st.dataframe([{"Descrição": row.description, "Categoria": row.category, "Vencimento": date_only(row.due_date),
                            "Valor": currency(row.amount), "Status": row.status} for row in open_payables], width="stretch", hide_index=True)

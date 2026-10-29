@@ -13,6 +13,8 @@ py -3 -m streamlit run app.py
 
 O banco padrão é `cafeteria.db` ao lado de `app.py`, independentemente do diretório de onde o Streamlit for iniciado. Um arquivo `cafeteria.db` encontrado em outro diretório de execução bloqueia a inicialização para evitar abrir silenciosamente um banco vazio; nesse caso, configure `DATABASE_URL` explicitamente para o arquivo que contém o histórico. O banco configurado é criado na primeira execução; o aplicativo não insere dados fictícios nesse banco automaticamente. Use `DATABASE_URL` para apontar para PostgreSQL ou outro banco suportado pelo SQLAlchemy.
 
+Com `APP_ENV=production`, o app bloqueia inicialização com SQLite no banco operacional e exige `DATABASE_URL` explícita em PostgreSQL/Supabase.
+
 ### Backups do banco operacional
 
 Para SQLite, o aplicativo cria snapshots consistentes e verifica sua integridade a cada intervalo de 15 minutos de uso, mantendo até 96 cópias automáticas (aproximadamente 24 horas). O diretório padrão é `backups/`, ao lado de `app.py`; configure `BACKUP_DIRECTORY` para outro destino persistente. `BACKUP_RETENTION_COUNT` altera o limite de cópias e precisa ser maior que zero. Se o backup automático falhar, a inicialização é interrompida com o erro em vez de continuar silenciosamente sem a proteção configurada. A tela **Configurações → Proteção do banco de dados** mostra o snapshot mais recente e permite baixar uma cópia atual; a exportação é registrada na auditoria.
@@ -76,6 +78,8 @@ Confira contagens e totais de vendas no banco de teste. Repita o teste ao menos 
 
 `MODO_HOMOLOGACAO = True` mantém o login desativado, permissões ignoradas e registra operações com `SISTEMA_HOMOLOGACAO`. Para ativar o login, defina `MODO_HOMOLOGACAO=False` em `config.py` ou use a variável de ambiente `MODO_HOMOLOGACAO=false`. Na primeira abertura será solicitado o cadastro do administrador. Perfis e permissões são inicializados no banco; o módulo administrativo de usuários permanece oculto até `MODULO_USUARIOS=True`.
 
+No modo com login ativo, a sessão autenticada usa token opaco persistido em cookie com `Secure` e `SameSite` configuráveis (`AUTH_COOKIE_SECURE`, `AUTH_COOKIE_SAMESITE`) e renovação deslizante por `AUTH_SESSION_TTL_DAYS`. O logout revoga a sessão no banco e remove o cookie.
+
 `MODO_DEMONSTRACAO=true` seleciona um arquivo SQLite separado (`cafeteria_demo.db`, configurável por `DEMO_DATABASE_URL`) e exibe um selo global. A configuração recusa banco em memória e impede que o caminho coincida com `DATABASE_URL`. Em Configurações, **Popular Dados de Demonstração** substitui somente os dados desse arquivo, gerando catálogo, estoque, pedidos, caixa e financeiro dos últimos 90 dias. O modo fica desativado por padrão; o app não semeia mais registros demonstrativos automaticamente no banco principal. `MODO_HOMOLOGACAO` controla login/permissões e é independente do modo de dados.
 
 Para ativar no PowerShell:
@@ -96,6 +100,14 @@ Os módulos de Financeiro, DRE e Inteligência são controlados por flags em `co
 A tela inicial prioriza tarefas operacionais e mostra apenas os estados permitidos pelo perfil ativo; o menu superior não repete os atalhos de operação já disponíveis no início. Indicadores financeiros e a visão geral ficam na área de Gestão, acessível conforme as permissões. A projeção de fluxo de caixa fica no módulo Financeiro; Relatórios mantém consultas históricas e análises por período.
 
 Quando um pedido é finalizado na cozinha, o sistema abre uma comanda vinculada ao cliente. A área **Comandas** reúne as contas abertas; é possível adicionar pedidos à comanda (cada novo lote volta à fila da cozinha) e fechar/cobrar quando todos os pedidos estiverem finalizados e houver caixa aberto. O recebimento é registrado como entrada no caixa com a forma de pagamento escolhida. Em telas menores, o seletor de navegação continua oferecendo os módulos autorizados.
+
+Novos pedidos exigem **caixa aberto** (inclusive ao adicionar pedido em comanda). Com o caixa fechado, a interface bloqueia a operação e orienta abrir um turno primeiro, preservando a integridade financeira.
+
+Pedidos compostos apenas por itens sem preparo (sem ficha técnica de cozinha ou com ficha de autoconsumo) são finalizados automaticamente com baixa de estoque imediata, evitando envio desnecessário para a cozinha.
+
+Após o fechamento de caixa, o módulo **Caixa** disponibiliza exportação em Excel com movimentação detalhada por item (data, hora, produto, quantidade, valor unitário, valor total, forma de pagamento) e resumo financeiro do turno.
+
+No modo com login, a sessão autenticada agora persiste por até 14 dias com renovação de atividade, reduzindo novos logins em acessos móveis sem remover o fluxo de logout.
 
 O tema compartilhado define cores escuras de alto contraste para valores, rótulos, botões, campos e mensagens, incluindo os indicadores da página inicial e da visão geral. O tema e a marca visual do Café Aroma do Sul são configurados em `.streamlit/config.toml` e `components/layout.py`.
 

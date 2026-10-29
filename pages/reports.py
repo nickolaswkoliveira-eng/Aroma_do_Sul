@@ -262,6 +262,14 @@ def _peak_report(session: Session) -> None:
     busiest = summary.loc[summary["Pedidos"].idxmax()]
     quietest = summary.loc[summary["Pedidos"].idxmin()]
     st.caption(f"Maior movimento: {int(busiest['Hora']):02d}h · Menor movimento (entre horários com vendas): {int(quietest['Hora']):02d}h")
+    hourly = pd.DataFrame({
+        "Hora": [f"{hour:02d}:00" for hour in range(24)],
+        "Pedidos": [int(summary.loc[summary["Hora"] == hour, "Pedidos"].sum()) for hour in range(24)],
+    })
+    bar = px.bar(hourly, x="Hora", y="Pedidos", color="Pedidos", color_continuous_scale=CHART_SCALE)
+    bar.update_layout(height=280, margin=dict(l=0, r=0, t=8, b=0), coloraxis_colorbar_title="Pedidos")
+    apply_chart_theme(bar)
+    st.plotly_chart(bar, width="stretch")
     weekday_names = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
     heatmap_data = pd.DataFrame([{"Hora": order.created_at.hour, "Dia": weekday_names[order.created_at.weekday()]}
                                  for order in orders])

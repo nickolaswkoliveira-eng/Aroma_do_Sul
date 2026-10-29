@@ -31,6 +31,7 @@ class DomainTests(unittest.TestCase):
         Base.metadata.create_all(self.engine)
         self.session = Session(self.engine)
         seed_demo_data(self.session)
+        open_cash(self.session, 0, "Turno teste")
 
     def tearDown(self):
         self.session.close()
@@ -89,7 +90,6 @@ class DomainTests(unittest.TestCase):
 
             for status in ("Em preparo", "Pronto", "Entregue", "Finalizado"):
                 update_order_status(self.session, second_order, status)
-            open_cash(self.session, 20)
             received = close_comanda(self.session, comanda, "Pix", "Operador")
 
         self.assertEqual(received, first_order.total + second_order.total)
@@ -154,7 +154,7 @@ class DomainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_order(self.session, [{"product_id": product.id, "quantity": 3}])
         order = create_order(self.session, [{"product_id": product.id, "quantity": 1}])
-        update_order_status(self.session, order, "Em preparo")
+        self.assertEqual(order.status, "Finalizado")
         self.assertEqual(stock.quantity, 1)
 
     def test_visible_datetime_formats_hide_subseconds(self):
@@ -298,6 +298,8 @@ class DomainTests(unittest.TestCase):
             demo_engine.dispose()
 
     def test_cash_balance_and_close(self):
+        active_cash = self.session.scalar(select(CashSession).where(CashSession.is_open.is_(True)))
+        close_cash(self.session, active_cash)
         cash = open_cash(self.session, 100, "Operador teste")
         add_cash_movement(self.session, cash, "Entrada", "Pix", 25, "Venda teste")
         add_cash_movement(self.session, cash, "Saída", "Sangria", 10, "Sangria teste")

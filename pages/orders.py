@@ -4,7 +4,7 @@ import streamlit as st
 
 from components.layout import metric_card, section_heading
 from database.connection import get_session
-from models.entities import Category, Comanda, Customer, Order, OrderItem, Product, Stock
+from models.entities import CashSession, Category, Comanda, Customer, Order, OrderItem, Product, Stock
 from services.domain import create_order
 from utils.clock import local_today
 from utils.formatting import currency, date_time
@@ -12,6 +12,18 @@ from utils.session_state import (
     persist_value, persistent_number_input, persistent_selectbox, persistent_text_input,
     persistent_widget, persistent_toggle,
 )
+
+
+def _orders_items_map(session: Session, order_ids: list[int]) -> dict[int, list[OrderItem]]:
+    if not order_ids:
+        return {}
+    items = session.scalars(
+        select(OrderItem).where(OrderItem.order_id.in_(order_ids))
+    ).all()
+    by_order: dict[int, list[OrderItem]] = {}
+    for item in items:
+        by_order.setdefault(item.order_id, []).append(item)
+    return by_order
 
 
 def _render_live_orders_panel_content(session: Session) -> None:
@@ -28,12 +40,12 @@ def _render_live_orders_panel_content(session: Session) -> None:
         metric_card("Concluídos hoje", str(completed_today), "Finalizados")
     latest_orders = session.scalars(select(Order).order_by(Order.created_at.desc()).limit(8)).all()
     with st.expander("Atualização em tempo real", expanded=False):
-        st.caption("Pedidos do celular aparecem aqui automaticamente (atualização a cada 5 segundos).")
+        st.caption("Pedidos do celular aparecem aqui automaticamente (atualização a cada 8 segundos).")
         for order in latest_orders:
             st.write(f"**#{order.id} · {order.status}** · {date_time(order.created_at)} · {currency(order.total)}")
 
 
-@st.fragment(run_every="5s")
+@st.fragment(run_every="8s")
 def _render_live_orders_panel_auto() -> None:
     session = get_session()
     try:
@@ -47,7 +59,7 @@ def render(session: Session) -> None:
     if "cart" not in st.session_state:
         st.session_state.cart = {}
     live_refresh = persistent_toggle(
-        "Atualizar pedidos em tempo real (5s)",
+        "Atualizar pedidos em tempo real (8s)",
         key="orders.live_refresh",
         default=True,
     )
@@ -60,13 +72,17 @@ def render(session: Session) -> None:
     open_comandas = session.scalars(
         select(Comanda).where(Comanda.status == "Aberta").order_by(Comanda.created_at)
     ).all()
+    cash_open = session.scalar(select(CashSession.id).where(CashSession.is_open.is_(True)).limit(1)) is not None
+    if not cash_open:
+        st.warning("Caixa fechado. Abra um turno no módulo Caixa para registrar novos pedidos.")
     comanda_ids = {comanda.id for comanda in open_comandas}
     if st.session_state.get("orders.comanda_target") not in comanda_ids:
         st.session_state.pop("orders.comanda_target", None)
+    customer_ids = {comanda.customer_id for comanda in open_comandas if comanda.customer_id is not None}
     customers_by_id = {
         customer.id: customer.name
-        for customer in session.scalars(select(Customer)).all()
-    }
+        for customer in session.scalars(select(Customer).where(Customer.id.in_(customer_ids))).all()
+    } if customer_ids else {}
     comanda_labels = {
         comanda.id: (
             f"Comanda #{comanda.id} · "
@@ -138,12 +154,11 @@ def render(session: Session) -> None:
                                                        default=1, min_value=1, max_value=50)
                     note = persistent_text_input("Observação", key=f"orders.note.{product.id}",
                                                  placeholder="Ex.: sem açúcar")
-                    if st.button("Adicionar", key=f"add_{product.id}", width="stretch"):
+                    if st.button("Adicionar", key=f"add_{product.id}", width="stretch", disabled=not cash_open):
                         current = st.session_state.cart.get(product.id, {"quantity": 0, "notes": note})
                         current["quantity"] += int(quantity)
                         current["notes"] = note
                         st.session_state.cart[product.id] = current
-                        st.rerun()
         if page_count > 1:
             previous, page_label, next_button = st.columns([1, 2, 1])
             if previous.button("←", help="Produtos anteriores", disabled=catalog_page <= 1, key="orders.catalog.previous"):
@@ -202,7 +217,12 @@ def render(session: Session) -> None:
                 customer_name = st.text_input("Cliente (opcional)", **persistent_widget("orders.customer_name", ""))
                 phone = st.text_input("Telefone (opcional)", **persistent_widget("orders.customer_phone", ""))
             notes = st.text_input("Observações do pedido", **persistent_widget("orders.notes", ""))
-            if st.button("Finalizar Pedido", type="primary", width="stretch", disabled=not st.session_state.cart):
+            if st.button(
+                "Finalizar Pedido",
+                type="primary",
+                width="stretch",
+                disabled=not st.session_state.cart or not cash_open,
+            ):
                 try:
                     created = create_order(session, [{"product_id": product_id, **item} for product_id, item in st.session_state.cart.items()],
                                            customer_name if selected_comanda_id is None else "",
@@ -210,10 +230,16 @@ def render(session: Session) -> None:
                                            st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
                                            comanda_id=selected_comanda_id)
                     st.session_state.cart = {}
-                    st.success(
-                        f"Pedido #{created.id} enviado para preparo."
-                        + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
-                    )
+                    if created.status == "Finalizado":
+                        st.success(
+                            f"Pedido #{created.id} registrado com entrega imediata."
+                            + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
+                        )
+                    else:
+                        st.success(
+                            f"Pedido #{created.id} enviado para preparo."
+                            + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
+                        )
                     st.rerun()
                 except ValueError as error:
                     session.rollback()
@@ -229,9 +255,15 @@ def render(session: Session) -> None:
         persist_value("orders.page", current_page)
     orders = session.scalars(select(Order).order_by(Order.created_at.desc())
                              .offset((current_page - 1) * page_size).limit(page_size)).all()
+    order_items_by_order = _orders_items_map(session, [order.id for order in orders])
+    product_ids = {item.product_id for items in order_items_by_order.values() for item in items}
+    products_by_recent = {
+        product.id: product.name
+        for product in session.scalars(select(Product).where(Product.id.in_(product_ids))).all()
+    } if product_ids else {}
     for order in orders:
-        items = session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all()
-        product_names = [session.get(Product, item.product_id).name for item in items]
+        items = order_items_by_order.get(order.id, [])
+        product_names = [products_by_recent.get(item.product_id, "Produto") for item in items]
         st.write(f"**#{order.id} · {order.status}** · {date_time(order.created_at)} · {', '.join(product_names)} · {currency(order.total)}")
     if page_count > 1:
         previous, page_label, next_button = st.columns([1, 2, 1])

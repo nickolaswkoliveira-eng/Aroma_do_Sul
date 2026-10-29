@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Sao_Paulo")
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+IS_PRODUCTION = APP_ENV in {"prod", "production"}
 MODULO_USUARIOS = False
 MODULO_FINANCEIRO = True
 MODULO_DRE = True
@@ -61,8 +63,21 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
-DATABASE_URL = normalize_database_url(_setting("DATABASE_URL", DEFAULT_DATABASE_URL))
+database_url_raw = _setting("DATABASE_URL")
+if IS_PRODUCTION and not database_url_raw:
+    raise ValueError(
+        "APP_ENV=production exige DATABASE_URL explícita apontando para PostgreSQL/Supabase. "
+        "SQLite de fallback está bloqueado em produção."
+    )
+
+DATABASE_URL = normalize_database_url(database_url_raw or DEFAULT_DATABASE_URL)
 DEMO_DATABASE_URL = os.getenv("DEMO_DATABASE_URL", DEFAULT_DEMO_DATABASE_URL)
+AUTH_SESSION_TTL_DAYS = int(os.getenv("AUTH_SESSION_TTL_DAYS", "14"))
+if AUTH_SESSION_TTL_DAYS < 1:
+    raise ValueError("AUTH_SESSION_TTL_DAYS deve ser maior que zero.")
+AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "__Host-cafe_session")
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "Strict")
+AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true").strip().lower() == "true"
 BACKUP_DIRECTORY = Path(
     os.getenv("BACKUP_DIRECTORY", str(PROJECT_ROOT / "backups"))
 ).expanduser()

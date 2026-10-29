@@ -144,7 +144,8 @@ def top_navigation(groups: dict[str, list[tuple[str, str]]], user_name: str,
                    on_navigate: Callable[[str], None],
                    on_logout: Callable[[], None] | None = None,
                    mobile_destinations: Sequence[str] = ()) -> None:
-    st.session_state.mobile_nav_select = "Menu"
+    if "mobile_nav_select" not in st.session_state:
+        st.session_state.mobile_nav_select = "Menu"
     labels = ("Gestão", "Inteligência", "Configurações")
     visible_labels = [label for label in labels if groups.get(label)]
     with st.container(key="top_navigation"):

@@ -69,6 +69,37 @@ def _stock_requirements(session: Session, product_quantities: dict[int, int]) ->
     return required
 
 
+def _products_require_preparation(session: Session, product_ids: set[int]) -> bool:
+    if not product_ids:
+        return False
+    recipes = session.scalars(
+        select(RecipeItem).where(RecipeItem.product_id.in_(product_ids))
+    ).all()
+    if not recipes:
+        return False
+    return any(recipe.ingredient_id != recipe.product_id for recipe in recipes)
+
+
+def _consume_order_stock(
+    session: Session,
+    required_stock: dict[int, float],
+    order_id: int,
+    responsible: str,
+    reason_prefix: str,
+) -> None:
+    for ingredient_id, required in required_stock.items():
+        stock = session.scalar(select(Stock).where(Stock.product_id == ingredient_id))
+        stock.quantity -= required
+        stock.updated_at = local_now()
+        session.add(StockMovement(
+            product_id=ingredient_id,
+            movement_type="Saída",
+            quantity=required,
+            reason=f"{reason_prefix} #{order_id}",
+            responsible=responsible,
+        ))
+
+
 def _validate_stock(session: Session, required: dict[int, float]) -> None:
     for product_id, quantity in required.items():
         stock = session.scalar(select(Stock).where(Stock.product_id == product_id))
@@ -77,17 +108,62 @@ def _validate_stock(session: Session, required: dict[int, float]) -> None:
             raise ValueError(f"Estoque insuficiente: {product.name if product else 'produto/ingrediente'}.")
 
 
+def _is_postgres(session: Session) -> bool:
+    bind = session.get_bind()
+    return bool(bind and bind.dialect.name == "postgresql")
+
+
+def _lock_stocks(session: Session, product_ids: set[int]) -> dict[int, Stock]:
+    if not product_ids:
+        return {}
+    query = select(Stock).where(Stock.product_id.in_(product_ids))
+    if _is_postgres(session):
+        query = query.with_for_update()
+    locked = session.scalars(query).all()
+    return {row.product_id: row for row in locked}
+
+
+def _lock_order(session: Session, order_id: int) -> Order:
+    query = select(Order).where(Order.id == order_id)
+    if _is_postgres(session):
+        query = query.with_for_update()
+    locked = session.scalar(query)
+    if locked is None:
+        raise ValueError("Pedido não encontrado.")
+    return locked
+
+
+def _lock_comanda(session: Session, comanda_id: int) -> Comanda:
+    query = select(Comanda).where(Comanda.id == comanda_id)
+    if _is_postgres(session):
+        query = query.with_for_update()
+    locked = session.scalar(query)
+    if locked is None:
+        raise ValueError("Comanda não encontrada.")
+    return locked
+
+
+def _lock_open_cash(session: Session) -> CashSession | None:
+    query = select(CashSession).where(CashSession.is_open.is_(True)).order_by(CashSession.id)
+    if _is_postgres(session):
+        query = query.with_for_update()
+    return session.scalar(query)
+
+
 @_track_demo_mutations
 def create_order(session: Session, items: list[dict], customer_name: str = "", phone: str = "", notes: str = "",
                  responsible: str = "SISTEMA_HOMOLOGACAO",
                  comanda_id: int | None = None) -> Order:
     if not items:
         raise ValueError("Adicione ao menos um item ao pedido.")
-    comanda = session.get(Comanda, comanda_id) if comanda_id is not None else None
+    comanda = _lock_comanda(session, comanda_id) if comanda_id is not None else None
     if comanda_id is not None and (comanda is None or comanda.status != "Aberta"):
         raise ValueError("A comanda selecionada não está aberta.")
     if comanda is not None and (customer_name.strip() or phone.strip()):
         raise ValueError("Pedidos vinculados herdam o cliente da comanda.")
+    cash = _lock_open_cash(session)
+    if cash is None:
+        raise ValueError("Caixa fechado. Abra um turno para registrar novos pedidos.")
     requested: dict[int, int] = {}
     total_parts: list[float] = []
     for entry in items:
@@ -98,7 +174,14 @@ def create_order(session: Session, items: list[dict], customer_name: str = "", p
         requested[product.id] = requested.get(product.id, 0) + quantity
         total_parts.append(money_float(money(product.sale_price) * quantity))
     total = money_float(money_sum(total_parts))
-    _validate_stock(session, _stock_requirements(session, requested))
+    required_stock = _stock_requirements(session, requested)
+    locked_stocks = _lock_stocks(session, set(required_stock))
+    for product_id, quantity in required_stock.items():
+        stock = locked_stocks.get(product_id)
+        product = session.get(Product, product_id)
+        if stock is None or stock.quantity < quantity:
+            raise ValueError(f"Estoque insuficiente: {product.name if product else 'produto/ingrediente'}.")
+    requires_preparation = _products_require_preparation(session, set(requested))
     customer = session.get(Customer, comanda.customer_id) if comanda and comanda.customer_id else None
     if comanda is None and (customer_name.strip() or phone.strip()):
         customer = Customer(name=customer_name.strip() or "Cliente", phone=phone.strip())
@@ -116,6 +199,19 @@ def create_order(session: Session, items: list[dict], customer_name: str = "", p
     if comanda is not None:
         session.add(ComandaOrder(comanda_id=comanda.id, order_id=order.id))
         comanda.total += total
+    if not requires_preparation:
+        now = local_now()
+        _consume_order_stock(session, required_stock, order.id, responsible, "Baixa imediata do pedido")
+        order.status = "Finalizado"
+        order.started_at = now
+        order.ready_at = now
+        order.delivered_at = now
+        order.finished_at = now
+        if comanda is None:
+            comanda = Comanda(customer_id=order.customer_id, total=order.total)
+            session.add(comanda)
+            session.flush()
+            session.add(ComandaOrder(comanda_id=comanda.id, order_id=order.id))
     audit(session, "Pedido criado", f"Pedido #{order.id} | Total R$ {total:.2f}", responsible)
     session.commit()
     return order
@@ -124,62 +220,61 @@ def create_order(session: Session, items: list[dict], customer_name: str = "", p
 @_track_demo_mutations
 def update_order_status(session: Session, order: Order, new_status: str,
                         responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
+    locked_order = _lock_order(session, order.id)
     if new_status not in STATUSES:
         raise ValueError("Status de pedido inválido.")
     next_status = {"Recebido": "Em preparo", "Em preparo": "Pronto",
-                   "Pronto": "Entregue", "Entregue": "Finalizado"}.get(order.status)
+                   "Pronto": "Entregue", "Entregue": "Finalizado"}.get(locked_order.status)
     if new_status != next_status:
         raise ValueError(f"O próximo status permitido é {next_status or 'nenhum'}.")
-    if new_status == "Em preparo" and order.started_at is None:
-        order_items = session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all()
+    if new_status == "Em preparo" and locked_order.started_at is None:
+        order_items = session.scalars(select(OrderItem).where(OrderItem.order_id == locked_order.id)).all()
         product_quantities: dict[int, int] = {}
         for item in order_items:
             product_quantities[item.product_id] = product_quantities.get(item.product_id, 0) + item.quantity
         required_stock = _stock_requirements(session, product_quantities)
+        _lock_stocks(session, set(required_stock))
         _validate_stock(session, required_stock)
-        order.started_at = local_now()
-        for ingredient_id, required in required_stock.items():
-            stock = session.scalar(select(Stock).where(Stock.product_id == ingredient_id))
-            stock.quantity -= required
-            stock.updated_at = local_now()
-            session.add(StockMovement(product_id=ingredient_id, movement_type="Saída", quantity=required,
-                                      reason=f"Baixa do pedido #{order.id}", responsible=responsible))
-    if new_status == "Pronto" and order.ready_at is None:
-        order.ready_at = local_now()
-    if new_status == "Entregue" and order.delivered_at is None:
-        order.delivered_at = local_now()
-    if new_status == "Finalizado" and order.finished_at is None:
-        order.finished_at = local_now()
+        locked_order.started_at = local_now()
+        _consume_order_stock(session, required_stock, locked_order.id, responsible, "Baixa do pedido")
+    if new_status == "Pronto" and locked_order.ready_at is None:
+        locked_order.ready_at = local_now()
+    if new_status == "Entregue" and locked_order.delivered_at is None:
+        locked_order.delivered_at = local_now()
+    if new_status == "Finalizado" and locked_order.finished_at is None:
+        locked_order.finished_at = local_now()
         comanda_order = session.scalar(
-            select(ComandaOrder).where(ComandaOrder.order_id == order.id)
+            select(ComandaOrder).where(ComandaOrder.order_id == locked_order.id)
         )
         if comanda_order is None:
-            comanda = Comanda(customer_id=order.customer_id, total=order.total)
+            comanda = Comanda(customer_id=locked_order.customer_id, total=locked_order.total)
             session.add(comanda)
             session.flush()
-            session.add(ComandaOrder(comanda_id=comanda.id, order_id=order.id))
-    order.status = new_status
-    audit(session, "Status do pedido alterado", f"Pedido #{order.id}: {new_status}", responsible)
+            session.add(ComandaOrder(comanda_id=comanda.id, order_id=locked_order.id))
+    locked_order.status = new_status
+    audit(session, "Status do pedido alterado", f"Pedido #{locked_order.id}: {new_status}", responsible)
     session.commit()
 
 
 @_track_demo_mutations
 def cancel_order(session: Session, order: Order, reason: str,
                 responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
+    locked_order = _lock_order(session, order.id)
     reason = reason.strip()
     if len(reason) < 5:
         raise ValueError("Informe um motivo com ao menos 5 caracteres.")
-    if order.status == "Cancelado":
+    if locked_order.status == "Cancelado":
         raise ValueError("Este pedido já foi cancelado.")
-    if order.status == "Finalizado":
+    if locked_order.status == "Finalizado":
         raise ValueError("Pedidos finalizados não podem ser cancelados; registre um estorno.")
 
-    if order.started_at is not None:
-        items = session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all()
+    if locked_order.started_at is not None:
+        items = session.scalars(select(OrderItem).where(OrderItem.order_id == locked_order.id)).all()
         product_quantities: dict[int, int] = {}
         for item in items:
             product_quantities[item.product_id] = product_quantities.get(item.product_id, 0) + item.quantity
         required_stock = _stock_requirements(session, product_quantities)
+        _lock_stocks(session, set(required_stock))
         for product_id, quantity in required_stock.items():
             stock = session.scalar(select(Stock).where(Stock.product_id == product_id))
             if stock is None:
@@ -192,18 +287,18 @@ def cancel_order(session: Session, order: Order, reason: str,
                 product_id=product_id,
                 movement_type="Entrada",
                 quantity=quantity,
-                reason=f"Estorno do pedido #{order.id}: {reason}",
+                reason=f"Estorno do pedido #{locked_order.id}: {reason}",
                 responsible=responsible,
             ))
 
-    comanda_order = session.scalar(select(ComandaOrder).where(ComandaOrder.order_id == order.id))
+    comanda_order = session.scalar(select(ComandaOrder).where(ComandaOrder.order_id == locked_order.id))
     if comanda_order is not None:
-        comanda = session.get(Comanda, comanda_order.comanda_id)
+        comanda = _lock_comanda(session, comanda_order.comanda_id)
         if comanda and comanda.status == "Aberta":
-            comanda.total -= order.total
+            comanda.total -= locked_order.total
 
-    order.status = "Cancelado"
-    audit(session, "Pedido cancelado", f"Pedido #{order.id} | {reason}", responsible)
+    locked_order.status = "Cancelado"
+    audit(session, "Pedido cancelado", f"Pedido #{locked_order.id} | {reason}", responsible)
     session.commit()
 
 
@@ -214,7 +309,8 @@ def close_comanda(
     method: str,
     responsible: str = "SISTEMA_HOMOLOGACAO",
 ) -> float:
-    if comanda.status != "Aberta":
+    locked_comanda = _lock_comanda(session, comanda.id)
+    if locked_comanda.status != "Aberta":
         raise ValueError("Esta comanda já foi fechada.")
     allowed_methods = ("Dinheiro", "Pix", "Crédito", "Débito")
     if method not in allowed_methods:
@@ -223,36 +319,36 @@ def close_comanda(
         select(Order.id)
         .join(ComandaOrder, ComandaOrder.order_id == Order.id)
         .where(
-            ComandaOrder.comanda_id == comanda.id,
+            ComandaOrder.comanda_id == locked_comanda.id,
             Order.status != "Finalizado",
         )
         .limit(1)
     )
     if pending_order is not None:
         raise ValueError("Finalize os pedidos vinculados à comanda antes de fechar a conta.")
-    cash = session.scalar(select(CashSession).where(CashSession.is_open.is_(True)))
+    cash = _lock_open_cash(session)
     if cash is None:
         raise ValueError("Abra o caixa antes de receber o pagamento da comanda.")
-    if comanda.total <= 0:
+    if locked_comanda.total <= 0:
         raise ValueError("Não é possível fechar uma comanda sem valor.")
 
-    comanda.status = "Fechada"
-    comanda.closed_at = local_now()
-    comanda.total = money_float(comanda.total)
+    locked_comanda.status = "Fechada"
+    locked_comanda.closed_at = local_now()
+    locked_comanda.total = money_float(locked_comanda.total)
     session.add(CashMovement(
         cash_session_id=cash.id,
         movement_type="Entrada",
         method=method,
-        amount=comanda.total,
-        description=f"Comanda #{comanda.id}",
+        amount=locked_comanda.total,
+        description=f"Comanda #{locked_comanda.id}",
     ))
     audit(
         session,
         "Comanda fechada",
-        f"Comanda #{comanda.id} | {method} | R$ {comanda.total:.2f}",
+        f"Comanda #{locked_comanda.id} | {method} | R$ {locked_comanda.total:.2f}",
         responsible,
     )
-    total = comanda.total
+    total = locked_comanda.total
     session.commit()
     return total
 
@@ -262,7 +358,10 @@ def move_stock(session: Session, product_id: int, movement_type: str, quantity: 
                responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
     if quantity <= 0:
         raise ValueError("A quantidade deve ser maior que zero.")
-    stock = session.scalar(select(Stock).where(Stock.product_id == product_id))
+    stock_query = select(Stock).where(Stock.product_id == product_id)
+    if _is_postgres(session):
+        stock_query = stock_query.with_for_update()
+    stock = session.scalar(stock_query)
     if stock is None:
         stock = Stock(product_id=product_id, quantity=0, minimum_quantity=0)
         session.add(stock)
@@ -291,7 +390,7 @@ def open_cash(session: Session, opening_balance: float, operator: str = "SISTEMA
         raise ValueError("O saldo inicial não pode ser negativo.")
     if not operator.strip():
         raise ValueError("Informe o operador responsável pelo caixa.")
-    if session.scalar(select(CashSession).where(CashSession.is_open.is_(True))):
+    if _lock_open_cash(session):
         raise ValueError("Já existe um caixa aberto.")
     cash = CashSession(opening_balance=opening_balance, operator=operator)
     session.add(cash)
@@ -313,7 +412,13 @@ def cash_balance(session: Session, cash: CashSession) -> float:
 def add_cash_movement(session: Session, cash: CashSession, movement_type: str, method: str,
                       amount: float, description: str = "",
                       responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
-    if not cash.is_open:
+    locked_cash_query = select(CashSession).where(CashSession.id == cash.id)
+    if _is_postgres(session):
+        locked_cash_query = locked_cash_query.with_for_update()
+    locked_cash = session.scalar(locked_cash_query)
+    if locked_cash is None:
+        raise ValueError("Caixa não encontrado.")
+    if not locked_cash.is_open:
         raise ValueError("Não é possível movimentar um caixa fechado.")
     if movement_type not in ("Entrada", "Saída"):
         raise ValueError("Tipo de movimento de caixa inválido.")
@@ -322,7 +427,7 @@ def add_cash_movement(session: Session, cash: CashSession, movement_type: str, m
     if amount <= 0:
         raise ValueError("O valor deve ser maior que zero.")
     amount = money_float(amount)
-    session.add(CashMovement(cash_session_id=cash.id, movement_type=movement_type,
+    session.add(CashMovement(cash_session_id=locked_cash.id, movement_type=movement_type,
                              method=method, amount=amount, description=description))
     audit(session, f"Movimento de caixa: {movement_type}", f"{method} R$ {amount:.2f} | {description}", responsible)
     session.commit()
@@ -330,23 +435,28 @@ def add_cash_movement(session: Session, cash: CashSession, movement_type: str, m
 
 @_track_demo_mutations
 def close_cash(session: Session, cash: CashSession) -> float:
-    if not cash.is_open:
+    locked_cash_query = select(CashSession).where(CashSession.id == cash.id)
+    if _is_postgres(session):
+        locked_cash_query = locked_cash_query.with_for_update()
+    locked_cash = session.scalar(locked_cash_query)
+    if locked_cash is None:
+        raise ValueError("Caixa não encontrado.")
+    if not locked_cash.is_open:
         raise ValueError("Este caixa já foi fechado.")
     if session.scalar(select(CashSession.id).where(
-        CashSession.id != cash.id,
+        CashSession.id != locked_cash.id,
         CashSession.is_open.is_(True),
     ).limit(1)) is not None:
         raise ValueError("Existe outro caixa aberto. Fechamentos simultâneos são inválidos.")
-    balance = cash_balance(session, cash)
-    cash.closing_balance = balance
-    cash.closed_at = local_now()
-    cash.is_open = False
-    audit(session, "Fechamento de caixa", f"Saldo final R$ {balance:.2f}", cash.operator)
+    balance = cash_balance(session, locked_cash)
+    locked_cash.closing_balance = balance
+    locked_cash.closed_at = local_now()
+    locked_cash.is_open = False
+    audit(session, "Fechamento de caixa", f"Saldo final R$ {balance:.2f}", locked_cash.operator)
     session.commit()
     return balance
 
 
-@_track_demo_mutations
 @_track_demo_mutations
 def add_payable(session: Session, description: str, category: str, amount: float,
                 competence: date, due_date: date,
@@ -369,11 +479,17 @@ def add_payable(session: Session, description: str, category: str, amount: float
 @_track_demo_mutations
 def mark_payable_paid(session: Session, payable: Payable,
                       responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
-    if payable.status == "Pago":
+    payable_query = select(Payable).where(Payable.id == payable.id)
+    if _is_postgres(session):
+        payable_query = payable_query.with_for_update()
+    locked_payable = session.scalar(payable_query)
+    if locked_payable is None:
+        raise ValueError("Conta não encontrada.")
+    if locked_payable.status == "Pago":
         raise ValueError("Esta conta já está paga.")
-    payable.status = "Pago"
-    payable.paid_at = local_now()
-    audit(session, "Conta a pagar quitada", payable.description, responsible)
+    locked_payable.status = "Pago"
+    locked_payable.paid_at = local_now()
+    audit(session, "Conta a pagar quitada", locked_payable.description, responsible)
     session.commit()
 
 
@@ -395,11 +511,17 @@ def add_receivable(session: Session, description: str, amount: float, due_date: 
 @_track_demo_mutations
 def mark_receivable_received(session: Session, receivable: Receivable,
                              responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
-    if receivable.status == "Recebido":
+    receivable_query = select(Receivable).where(Receivable.id == receivable.id)
+    if _is_postgres(session):
+        receivable_query = receivable_query.with_for_update()
+    locked_receivable = session.scalar(receivable_query)
+    if locked_receivable is None:
+        raise ValueError("Receita não encontrada.")
+    if locked_receivable.status == "Recebido":
         raise ValueError("Esta receita já está recebida.")
-    receivable.status = "Recebido"
-    receivable.received_at = local_now()
-    audit(session, "Receita recebida", receivable.description, responsible)
+    locked_receivable.status = "Recebido"
+    locked_receivable.received_at = local_now()
+    audit(session, "Receita recebida", locked_receivable.description, responsible)
     session.commit()
 
 
