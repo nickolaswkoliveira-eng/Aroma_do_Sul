@@ -18,7 +18,10 @@ def _engine_options(database_url: str) -> dict:
     if database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
     # Evita conexões ociosas derrubadas pelo provedor.
-    return {"pool_recycle": 1800}
+    return {
+        "pool_recycle": 1800,
+        "connect_args": {"prepare_threshold": None},
+    }
 
 
 def _sqlite_path(database_url: str) -> Path | None:
