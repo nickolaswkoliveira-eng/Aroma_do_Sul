@@ -1,5 +1,6 @@
 import streamlit as st
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from components.layout import configure_page, top_navigation
 from components.qr_code import render_qr
@@ -37,8 +38,8 @@ def _login(session):
         password = st.text_input("Senha", type="password")
         confirmation = st.text_input("Confirmar senha", type="password")
         if st.button("Criar administrador", type="primary", key="auth.first_admin.submit"):
-            if not username or not full_name or len(password) < 8:
-                st.error("Preencha usuário e nome; a senha precisa ter ao menos 8 caracteres.")
+            if not username or not full_name or len(password) < 12:
+                st.error("Preencha usuário e nome; a senha precisa ter ao menos 12 caracteres.")
             elif password != confirmation:
                 st.error("As senhas não conferem.")
             else:
@@ -53,11 +54,14 @@ def _login(session):
     username = persistent_text_input("Usuário", key="auth.username")
     password = st.text_input("Senha", type="password")
     if st.button("Entrar", type="primary", width="stretch", key="auth.login.submit"):
-        user = authenticate(session, username, password)
-        if user:
-            st.session_state.user_id = user.id
-            st.rerun()
-        st.error("Usuário ou senha inválidos, ou usuário bloqueado.")
+        try:
+            user = authenticate(session, username, password)
+            if user:
+                st.session_state.user_id = user.id
+                st.rerun()
+            st.error("Usuário ou senha inválidos, ou usuário bloqueado.")
+        except ValueError as error:
+            st.error(str(error))
     return False
 
 
@@ -80,8 +84,14 @@ def _logout() -> None:
 def main() -> None:
     configure_page()
     initialize_app_state()
-    init_database()
-    session = get_session()
+    try:
+        init_database()
+        session = get_session()
+    except (SQLAlchemyError, OSError, ValueError) as error:
+        st.error("Banco de dados indisponível ou protegido contra uma configuração insegura.")
+        st.caption("As operações foram interrompidas para evitar perda ou gravação duplicada.")
+        st.code(str(error), language="text")
+        return
     try:
         if MODO_DEMONSTRACAO:
             seed_access_control(session)

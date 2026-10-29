@@ -77,6 +77,19 @@ class AppStateTests(unittest.TestCase):
         self.assertNotIn("Resumo de hoje", section_titles)
         self.assertEqual(len(app.exception), 0)
 
+    def test_settings_displays_operational_database_backup_status(self):
+        app_file = Path(__file__).resolve().parents[1] / "app.py"
+        app = AppTest.from_file(str(app_file)).run()
+        app.session_state["active_page"] = "Configurações"
+        app.run()
+        section_titles = [element.value for element in app.subheader]
+        self.assertIn("Proteção do banco de dados", section_titles)
+        self.assertTrue(any(
+            element.label == "Preparar backup atual para download"
+            for element in app.button
+        ))
+        self.assertEqual(len(app.exception), 0)
+
     def test_kitchen_tv_mode_uses_expanded_layout(self):
         app_file = Path(__file__).resolve().parents[1] / "app.py"
         app = AppTest.from_file(str(app_file)).run()

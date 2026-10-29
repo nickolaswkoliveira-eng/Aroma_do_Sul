@@ -6,12 +6,16 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from components.layout import section_heading
 from config import (
-    APP_TIMEZONE, DATABASE_URL, DEMO_DATABASE_URL, MODULO_DRE, MODULO_FINANCEIRO, MODULO_INTELIGENCIA,
+    APP_TIMEZONE, BACKUP_DIRECTORY, BACKUP_RETENTION_COUNT, DATABASE_URL,
+    DEMO_DATABASE_URL, MODULO_DRE, MODULO_FINANCEIRO, MODULO_INTELIGENCIA,
     MODULO_NFE, MODULO_USUARIOS, MODULO_WHATSAPP, MODO_HOMOLOGACAO,
     MODO_DEMONSTRACAO,
 )
+from database.connection import demo_engine, engine
 from models.entities import Audit, Category, DemoRecord, Order, Product
 from services.demo_data import populate_demo_data
+from services.database_backup import export_sqlite_backup, latest_automatic_backup
+from services.database_health import database_health
 from services.demo_environment import (
     delete_demo_data, export_demo_data, restore_demo_backup,
 )
@@ -175,7 +179,11 @@ def render(session) -> None:
             st.write(f"**Modo de acesso:** {'Homologação' if MODO_HOMOLOGACAO else 'Produção'}")
             st.write(f"**Modo de dados:** {'Demonstração' if MODO_DEMONSTRACAO else 'Real'}")
             active_database = DEMO_DATABASE_URL if MODO_DEMONSTRACAO else DATABASE_URL
-            st.write(f"**Banco:** {'SQLite' if active_database.startswith('sqlite') else 'Banco externo'}")
+            database_label = (
+                "SQLite" if active_database.startswith("sqlite")
+                else "PostgreSQL" if active_database.startswith("postgresql") else "Banco externo"
+            )
+            st.write(f"**Banco:** {database_label}")
             st.write(f"**Fuso horário:** {APP_TIMEZONE}")
             st.write("**Usuário ativo:**", st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
     with second:
@@ -192,6 +200,86 @@ def render(session) -> None:
             for label, enabled in flags.items():
                 st.write(f"{'Ativo' if enabled else 'Desativado'} · {label}")
     st.info("Os parâmetros de implantação são definidos em config.py e por variáveis de ambiente. Alterações operacionais são registradas no histórico de auditoria.")
+    if not MODO_DEMONSTRACAO:
+        st.subheader("Proteção do banco de dados")
+        if engine.url.drivername.startswith("sqlite"):
+            latest_backup = latest_automatic_backup(BACKUP_DIRECTORY)
+            health = database_health(engine, BACKUP_DIRECTORY)
+            st.write(f"**Pasta de backups:** `{BACKUP_DIRECTORY}`")
+            st.write(f"**Conexão:** {'OK' if health['connected'] else 'Falha'}")
+            st.write(f"**Integridade SQLite:** {health.get('integrity') or 'não verificada'}")
+            if health.get("backup_age_minutes") is not None:
+                st.write(f"**Backup atualizado há:** {health['backup_age_minutes']:.1f} min")
+            st.write(
+                "**Último backup automático:** "
+                f"{latest_backup.name if latest_backup else 'Ainda não criado'}"
+            )
+            st.caption(
+                "O SQLite recebe snapshots automáticos a cada 15 minutos de uso, "
+                f"mantendo até {BACKUP_RETENTION_COUNT} cópias. O primeiro backup "
+                "é criado após o banco já existir."
+            )
+            st.warning(
+                "A pasta padrão fica neste computador. Ela não substitui uma cópia "
+                "fora dele; configure BACKUP_DIRECTORY para armazenamento independente "
+                "e teste a restauração periodicamente."
+            )
+            if st.button(
+                "Preparar backup atual para download",
+                key="settings.database_backup_export",
+            ):
+                st.session_state.pop("settings.database_backup_download", None)
+                try:
+                    backup_data = export_sqlite_backup(engine)
+                    session.add(Audit(
+                        responsible=st.session_state.get(
+                            "acting_user", "SISTEMA_HOMOLOGACAO",
+                        ),
+                        action="Backup do banco operacional exportado",
+                        details="Cópia SQLite atual preparada para download.",
+                        created_at=local_now(),
+                    ))
+                    session.commit()
+                    st.session_state["settings.database_backup_download"] = (
+                        backup_data
+                    )
+                    st.session_state["settings.database_backup_filename"] = (
+                        f"cafeteria-backup-{local_now():%Y%m%d-%H%M%S}.sqlite3"
+                    )
+                except (OSError, ValueError, sqlite3.Error, SQLAlchemyError) as error:
+                    session.rollback()
+                    st.error(f"Não foi possível preparar o backup: {error}")
+            backup_data = st.session_state.get("settings.database_backup_download")
+            if backup_data:
+                st.download_button(
+                    "Baixar backup do banco operacional",
+                    data=backup_data,
+                    file_name=st.session_state["settings.database_backup_filename"],
+                    mime="application/vnd.sqlite3",
+                    key="settings.database_backup_download_button",
+                )
+        else:
+            health = database_health(engine, BACKUP_DIRECTORY)
+            st.write(f"**Conexão:** {'OK' if health['connected'] else 'Falha'}")
+            if health.get("error"):
+                st.error(f"Erro ao consultar o banco: {health['error']}")
+            age = health.get("external_backup_age_hours")
+            if age is None:
+                st.error(
+                    "Nenhum backup externo criptografado foi registrado ainda. "
+                    "Configure e execute o backup diário descrito no README."
+                )
+            else:
+                st.write(
+                    f"**Último backup externo:** {health['external_backup_at']:%d/%m/%Y %H:%M} "
+                    f"(há {age:.1f} h)"
+                )
+                if age > 26:
+                    st.error("O backup externo está atrasado (mais de 26 horas). Verifique a automação.")
+            st.caption(
+                "Mantenha também os backups nativos do provedor do banco e teste a "
+                "restauração periodicamente."
+            )
     if MODO_DEMONSTRACAO:
         _render_homologation(session)
     st.subheader("Auditoria recente")

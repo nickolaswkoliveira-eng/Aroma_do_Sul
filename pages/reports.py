@@ -28,7 +28,8 @@ REPORT_CARDS = {
 
 def _sales(session: Session, start: date, end: date):
     return session.scalars(select(Order).where(func.date(Order.created_at) >= start,
-                                               func.date(Order.created_at) <= end).order_by(Order.created_at)).all()
+                                               func.date(Order.created_at) <= end,
+                                               Order.status != "Cancelado").order_by(Order.created_at)).all()
 
 
 def render(session: Session) -> None:
@@ -128,7 +129,8 @@ def _product_report(session: Session) -> None:
     rows = session.execute(select(Product.id, Product.name, func.sum(OrderItem.quantity).label("units"),
                                  func.sum(OrderItem.quantity * OrderItem.unit_price).label("revenue"))
                            .join(OrderItem, OrderItem.product_id == Product.id).join(Order, Order.id == OrderItem.order_id)
-                           .where(func.date(Order.created_at) >= start, func.date(Order.created_at) <= end)
+                           .where(func.date(Order.created_at) >= start, func.date(Order.created_at) <= end,
+                                  Order.status != "Cancelado")
                            .group_by(Product.id).order_by(func.sum(OrderItem.quantity).desc())).all()
     if not rows:
         st.info("Sem itens vendidos no período.")

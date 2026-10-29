@@ -1,9 +1,12 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database.connection import Base
 from utils.clock import local_now
+
+# Valores monetários exatos no banco (centavos); o Python continua recebendo float.
+Money = Numeric(12, 2, asdecimal=False)
 
 
 class Role(Base):
@@ -52,8 +55,8 @@ class Product(Base):
     name: Mapped[str] = mapped_column(String(140), index=True)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categorias.id"), nullable=True)
     unit: Mapped[str] = mapped_column(String(20), default="un")
-    cost_price: Mapped[float] = mapped_column(Float, default=0)
-    sale_price: Mapped[float] = mapped_column(Float, default=0)
+    cost_price: Mapped[float] = mapped_column(Money, default=0)
+    sale_price: Mapped[float] = mapped_column(Money, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -107,7 +110,7 @@ class Order(Base):
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("clientes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="Recebido", index=True)
     notes: Mapped[str] = mapped_column(Text, default="")
-    total: Mapped[float] = mapped_column(Float, default=0)
+    total: Mapped[float] = mapped_column(Money, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ready_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -120,7 +123,7 @@ class Comanda(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("clientes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="Aberta", index=True)
-    total: Mapped[float] = mapped_column(Float, default=0)
+    total: Mapped[float] = mapped_column(Money, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -138,7 +141,7 @@ class OrderItem(Base):
     order_id: Mapped[int] = mapped_column(ForeignKey("pedidos.id"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("produtos.id"))
     quantity: Mapped[int] = mapped_column(Integer, default=1)
-    unit_price: Mapped[float] = mapped_column(Float)
+    unit_price: Mapped[float] = mapped_column(Money)
     notes: Mapped[str] = mapped_column(Text, default="")
 
 
@@ -146,8 +149,8 @@ class CashSession(Base):
     __tablename__ = "caixa"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     operator: Mapped[str] = mapped_column(String(80), default="SISTEMA_HOMOLOGACAO")
-    opening_balance: Mapped[float] = mapped_column(Float, default=0)
-    closing_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    opening_balance: Mapped[float] = mapped_column(Money, default=0)
+    closing_balance: Mapped[float | None] = mapped_column(Money, nullable=True)
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_open: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -159,7 +162,7 @@ class CashMovement(Base):
     cash_session_id: Mapped[int] = mapped_column(ForeignKey("caixa.id"), index=True)
     movement_type: Mapped[str] = mapped_column(String(20))
     method: Mapped[str] = mapped_column(String(30), default="Dinheiro")
-    amount: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(Money)
     description: Mapped[str] = mapped_column(String(220), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
 
@@ -169,7 +172,7 @@ class Payable(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     description: Mapped[str] = mapped_column(String(180))
     category: Mapped[str] = mapped_column(String(80), default="Diversos")
-    amount: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(Money)
     competence: Mapped[Date] = mapped_column(Date)
     due_date: Mapped[Date] = mapped_column(Date, index=True)
     status: Mapped[str] = mapped_column(String(20), default="Aberto", index=True)
@@ -180,7 +183,7 @@ class Receivable(Base):
     __tablename__ = "contas_receber"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     description: Mapped[str] = mapped_column(String(180))
-    amount: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(Money)
     due_date: Mapped[Date] = mapped_column(Date, index=True)
     status: Mapped[str] = mapped_column(String(20), default="Aberto", index=True)
     received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -191,7 +194,7 @@ class CashFlow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     reference_date: Mapped[Date] = mapped_column(Date, index=True)
     entry_type: Mapped[str] = mapped_column(String(20))
-    amount: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(Money)
     description: Mapped[str] = mapped_column(String(180), default="")
 
 
@@ -210,6 +213,15 @@ class LoginAudit(Base):
     username: Mapped[str] = mapped_column(String(80))
     success: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+
+
+class BackupRun(Base):
+    __tablename__ = "backup_execucoes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    location: Mapped[str] = mapped_column(String(300))
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="Sucesso")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
 
 
 class DemoRecord(Base):

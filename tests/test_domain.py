@@ -13,7 +13,7 @@ from models.entities import (
     Payable, Product, Receivable, RecipeItem, Role, Stock, StockMovement, User,
 )
 from services.domain import (
-    add_cash_movement, close_cash, close_comanda, cmv_for_period, create_order,
+    add_cash_movement, cancel_order, close_cash, close_comanda, cmv_for_period, create_order,
     open_cash, purchase_recommendations, product_unit_costs, stock_level,
     update_order_status,
 )
@@ -128,6 +128,21 @@ class DomainTests(unittest.TestCase):
         self.session.commit()
         with self.assertRaises(ValueError):
             create_order(self.session, [{"product_id": product.id, "quantity": 1}])
+
+    def test_cancelled_order_returns_preparation_stock_and_is_audited(self):
+        product = self.session.scalar(select(Product).where(Product.name == "Cappuccino"))
+        recipe = self.session.scalar(select(RecipeItem).where(RecipeItem.product_id == product.id).limit(1))
+        stock = self.session.scalar(select(Stock).where(Stock.product_id == recipe.ingredient_id))
+        initial_quantity = stock.quantity
+        order = create_order(self.session, [{"product_id": product.id, "quantity": 1}])
+        update_order_status(self.session, order, "Em preparo")
+        cancel_order(self.session, order, "Cliente desistiu", "Operador")
+
+        self.assertEqual(order.status, "Cancelado")
+        self.assertAlmostEqual(stock.quantity, initial_quantity)
+        self.assertIsNotNone(self.session.scalar(select(Audit.id).where(Audit.action == "Pedido cancelado")))
+        with self.assertRaisesRegex(ValueError, "já foi cancelado"):
+            cancel_order(self.session, order, "Segunda desistência", "Operador")
 
     def test_product_without_recipe_uses_its_own_stock(self):
         product = Product(code="TEST001", name="Produto de estoque", sale_price=5, cost_price=2)
@@ -249,6 +264,9 @@ class DomainTests(unittest.TestCase):
                 self.assertGreater(demo_session.scalar(select(func.count(Receivable.id))), 0)
                 self.assertEqual(demo_session.scalar(select(func.count(Role.id))), role_count)
                 self.assertEqual(demo_session.scalar(select(func.count(User.id))), user_count)
+                self.assertEqual(first["audits"], demo_session.scalar(select(func.count(Audit.id))))
+                self.assertGreater(first["cancelled_orders"], 0)
+                self.assertGreater(first["comandas"], 0)
                 audit_row = demo_session.scalar(
                     select(Audit).where(Audit.action == "Dados de demonstração gerados")
                 )
@@ -271,7 +289,9 @@ class DomainTests(unittest.TestCase):
                 self.assertEqual(
                     demo_session.scalar(select(func.count(Order.id))), first["orders"]
                 )
-                self.assertEqual(demo_session.scalar(select(func.count(Audit.id))), 1)
+                self.assertEqual(
+                    demo_session.scalar(select(func.count(Audit.id))), second["audits"]
+                )
                 self.assertEqual(demo_session.scalar(select(func.count(Role.id))), role_count)
                 self.assertEqual(demo_session.scalar(select(func.count(User.id))), user_count)
         finally:

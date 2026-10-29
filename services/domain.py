@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from functools import wraps
 from math import ceil
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from typing import Concatenate, ParamSpec, TypeVar
 
@@ -15,9 +16,10 @@ from models.entities import (
 )
 from services.demo_environment import track_demo_records
 from utils.clock import local_now, local_today
+from utils.money import money, money_float, money_sum
 
 
-STATUSES = ("Recebido", "Em preparo", "Pronto", "Entregue", "Finalizado")
+STATUSES = ("Recebido", "Em preparo", "Pronto", "Entregue", "Finalizado", "Cancelado")
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -28,8 +30,13 @@ def _track_demo_mutations(
     @wraps(function)
     def wrapper(session: Session, *args: _P.args, **kwargs: _P.kwargs) -> _R:
         tracking = track_demo_records(session) if MODO_DEMONSTRACAO else nullcontext()
-        with tracking:
-            return function(session, *args, **kwargs)
+        try:
+            with tracking:
+                return function(session, *args, **kwargs)
+        except (ValueError, SQLAlchemyError, KeyError, TypeError):
+            if session.in_transaction():
+                session.rollback()
+            raise
 
     return wrapper
 
@@ -82,14 +89,15 @@ def create_order(session: Session, items: list[dict], customer_name: str = "", p
     if comanda is not None and (customer_name.strip() or phone.strip()):
         raise ValueError("Pedidos vinculados herdam o cliente da comanda.")
     requested: dict[int, int] = {}
-    total = 0.0
+    total_parts: list[float] = []
     for entry in items:
         product = session.get(Product, int(entry["product_id"]))
         quantity = int(entry["quantity"])
         if product is None or not product.active or quantity < 1:
             raise ValueError("Produto ou quantidade inválida.")
         requested[product.id] = requested.get(product.id, 0) + quantity
-        total += product.sale_price * quantity
+        total_parts.append(money_float(money(product.sale_price) * quantity))
+    total = money_float(money_sum(total_parts))
     _validate_stock(session, _stock_requirements(session, requested))
     customer = session.get(Customer, comanda.customer_id) if comanda and comanda.customer_id else None
     if comanda is None and (customer_name.strip() or phone.strip()):
@@ -156,6 +164,50 @@ def update_order_status(session: Session, order: Order, new_status: str,
 
 
 @_track_demo_mutations
+def cancel_order(session: Session, order: Order, reason: str,
+                responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
+    reason = reason.strip()
+    if len(reason) < 5:
+        raise ValueError("Informe um motivo com ao menos 5 caracteres.")
+    if order.status == "Cancelado":
+        raise ValueError("Este pedido já foi cancelado.")
+    if order.status == "Finalizado":
+        raise ValueError("Pedidos finalizados não podem ser cancelados; registre um estorno.")
+
+    if order.started_at is not None:
+        items = session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all()
+        product_quantities: dict[int, int] = {}
+        for item in items:
+            product_quantities[item.product_id] = product_quantities.get(item.product_id, 0) + item.quantity
+        required_stock = _stock_requirements(session, product_quantities)
+        for product_id, quantity in required_stock.items():
+            stock = session.scalar(select(Stock).where(Stock.product_id == product_id))
+            if stock is None:
+                stock = Stock(product_id=product_id, quantity=0, minimum_quantity=0)
+                session.add(stock)
+                session.flush()
+            stock.quantity += quantity
+            stock.updated_at = local_now()
+            session.add(StockMovement(
+                product_id=product_id,
+                movement_type="Entrada",
+                quantity=quantity,
+                reason=f"Estorno do pedido #{order.id}: {reason}",
+                responsible=responsible,
+            ))
+
+    comanda_order = session.scalar(select(ComandaOrder).where(ComandaOrder.order_id == order.id))
+    if comanda_order is not None:
+        comanda = session.get(Comanda, comanda_order.comanda_id)
+        if comanda and comanda.status == "Aberta":
+            comanda.total -= order.total
+
+    order.status = "Cancelado"
+    audit(session, "Pedido cancelado", f"Pedido #{order.id} | {reason}", responsible)
+    session.commit()
+
+
+@_track_demo_mutations
 def close_comanda(
     session: Session,
     comanda: Comanda,
@@ -186,6 +238,7 @@ def close_comanda(
 
     comanda.status = "Fechada"
     comanda.closed_at = local_now()
+    comanda.total = money_float(comanda.total)
     session.add(CashMovement(
         cash_session_id=cash.id,
         movement_type="Entrada",
@@ -233,6 +286,11 @@ def move_stock(session: Session, product_id: int, movement_type: str, quantity: 
 
 @_track_demo_mutations
 def open_cash(session: Session, opening_balance: float, operator: str = "SISTEMA_HOMOLOGACAO") -> CashSession:
+    opening_balance = money_float(opening_balance)
+    if opening_balance < 0:
+        raise ValueError("O saldo inicial não pode ser negativo.")
+    if not operator.strip():
+        raise ValueError("Informe o operador responsável pelo caixa.")
     if session.scalar(select(CashSession).where(CashSession.is_open.is_(True))):
         raise ValueError("Já existe um caixa aberto.")
     cash = CashSession(opening_balance=opening_balance, operator=operator)
@@ -244,18 +302,26 @@ def open_cash(session: Session, opening_balance: float, operator: str = "SISTEMA
 
 def cash_balance(session: Session, cash: CashSession) -> float:
     movements = session.scalars(select(CashMovement).where(CashMovement.cash_session_id == cash.id)).all()
-    balance = cash.opening_balance
+    balance = money(cash.opening_balance)
     for movement in movements:
-        balance += movement.amount if movement.movement_type == "Entrada" else -movement.amount
-    return balance
+        amount = money(movement.amount)
+        balance += amount if movement.movement_type == "Entrada" else -amount
+    return money_float(balance)
 
 
 @_track_demo_mutations
 def add_cash_movement(session: Session, cash: CashSession, movement_type: str, method: str,
                       amount: float, description: str = "",
                       responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
+    if not cash.is_open:
+        raise ValueError("Não é possível movimentar um caixa fechado.")
+    if movement_type not in ("Entrada", "Saída"):
+        raise ValueError("Tipo de movimento de caixa inválido.")
+    if method not in ("Dinheiro", "Pix", "Crédito", "Débito", "Despesa", "Sangria"):
+        raise ValueError("Forma de movimento de caixa inválida.")
     if amount <= 0:
         raise ValueError("O valor deve ser maior que zero.")
+    amount = money_float(amount)
     session.add(CashMovement(cash_session_id=cash.id, movement_type=movement_type,
                              method=method, amount=amount, description=description))
     audit(session, f"Movimento de caixa: {movement_type}", f"{method} R$ {amount:.2f} | {description}", responsible)
@@ -264,6 +330,13 @@ def add_cash_movement(session: Session, cash: CashSession, movement_type: str, m
 
 @_track_demo_mutations
 def close_cash(session: Session, cash: CashSession) -> float:
+    if not cash.is_open:
+        raise ValueError("Este caixa já foi fechado.")
+    if session.scalar(select(CashSession.id).where(
+        CashSession.id != cash.id,
+        CashSession.is_open.is_(True),
+    ).limit(1)) is not None:
+        raise ValueError("Existe outro caixa aberto. Fechamentos simultâneos são inválidos.")
     balance = cash_balance(session, cash)
     cash.closing_balance = balance
     cash.closed_at = local_now()
@@ -274,6 +347,62 @@ def close_cash(session: Session, cash: CashSession) -> float:
 
 
 @_track_demo_mutations
+@_track_demo_mutations
+def add_payable(session: Session, description: str, category: str, amount: float,
+                competence: date, due_date: date,
+                responsible: str = "SISTEMA_HOMOLOGACAO") -> Payable:
+    if not description.strip():
+        raise ValueError("Informe a descrição da conta.")
+    if amount <= 0:
+        raise ValueError("O valor da conta deve ser maior que zero.")
+    amount = money_float(amount)
+    row = Payable(
+        description=description.strip(), category=category,
+        amount=amount, competence=competence, due_date=due_date,
+    )
+    session.add(row)
+    audit(session, "Conta a pagar cadastrada", f"{row.description} · R$ {amount:.2f}", responsible)
+    session.commit()
+    return row
+
+
+@_track_demo_mutations
+def mark_payable_paid(session: Session, payable: Payable,
+                      responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
+    if payable.status == "Pago":
+        raise ValueError("Esta conta já está paga.")
+    payable.status = "Pago"
+    payable.paid_at = local_now()
+    audit(session, "Conta a pagar quitada", payable.description, responsible)
+    session.commit()
+
+
+@_track_demo_mutations
+def add_receivable(session: Session, description: str, amount: float, due_date: date,
+                   responsible: str = "SISTEMA_HOMOLOGACAO") -> Receivable:
+    if not description.strip():
+        raise ValueError("Informe a origem da receita.")
+    if amount <= 0:
+        raise ValueError("O valor previsto deve ser maior que zero.")
+    amount = money_float(amount)
+    row = Receivable(description=description.strip(), amount=amount, due_date=due_date)
+    session.add(row)
+    audit(session, "Receita prevista cadastrada", f"{row.description} · R$ {amount:.2f}", responsible)
+    session.commit()
+    return row
+
+
+@_track_demo_mutations
+def mark_receivable_received(session: Session, receivable: Receivable,
+                             responsible: str = "SISTEMA_HOMOLOGACAO") -> None:
+    if receivable.status == "Recebido":
+        raise ValueError("Esta receita já está recebida.")
+    receivable.status = "Recebido"
+    receivable.received_at = local_now()
+    audit(session, "Receita recebida", receivable.description, responsible)
+    session.commit()
+
+
 def update_overdue_payables(session: Session) -> None:
     today = local_today()
     entries = session.scalars(select(Payable).where(Payable.status == "Aberto", Payable.due_date < today)).all()
@@ -347,7 +476,8 @@ def purchase_recommendations(session: Session, coverage_days: int = 14) -> list[
 
 def cmv_for_period(session: Session, start: date, end: date) -> dict[str, float]:
     items = session.scalars(select(OrderItem).join(Order, Order.id == OrderItem.order_id).where(
-        func.date(Order.created_at) >= start, func.date(Order.created_at) <= end)).all()
+        func.date(Order.created_at) >= start, func.date(Order.created_at) <= end,
+        Order.status != "Cancelado")).all()
     if not items:
         return {"revenue": 0.0, "cost": 0.0, "ratio": 0.0}
     product_ids = {item.product_id for item in items}

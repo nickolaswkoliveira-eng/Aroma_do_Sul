@@ -4,7 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-from config import DATABASE_URL, DEMO_DATABASE_URL, MODO_DEMONSTRACAO
+from config import (
+    BACKUP_DIRECTORY, BACKUP_RETENTION_COUNT, DATABASE_URL, DEFAULT_DATABASE_URL,
+    DEFAULT_DEMO_DATABASE_URL, DEMO_DATABASE_URL, MODO_DEMONSTRACAO,
+)
 
 
 class Base(DeclarativeBase):
@@ -12,7 +15,10 @@ class Base(DeclarativeBase):
 
 
 def _engine_options(database_url: str) -> dict:
-    return {"connect_args": {"check_same_thread": False}} if database_url.startswith("sqlite") else {}
+    if database_url.startswith("sqlite"):
+        return {"connect_args": {"check_same_thread": False}}
+    # Evita conexões ociosas derrubadas pelo provedor.
+    return {"pool_recycle": 1800}
 
 
 def _sqlite_path(database_url: str) -> Path | None:
@@ -21,6 +27,25 @@ def _sqlite_path(database_url: str) -> Path | None:
         return None
     return Path(url.database).resolve()
 
+
+def _default_database_path_guard(database_url: str, default_url: str) -> None:
+    if database_url != default_url:
+        return
+    filename = make_url(default_url).database
+    if not filename:
+        return
+    configured_path = Path(filename).resolve()
+    legacy_path = (Path.cwd() / configured_path.name).resolve()
+    if legacy_path != configured_path and legacy_path.is_file():
+        raise ValueError(
+            f"Foi encontrado um banco em {legacy_path}, mas o caminho padrão atual "
+            f"é {configured_path}. Configure DATABASE_URL explicitamente para evitar "
+            "abrir um banco vazio ou deixar o histórico inacessível."
+        )
+
+
+_default_database_path_guard(DATABASE_URL, DEFAULT_DATABASE_URL)
+_default_database_path_guard(DEMO_DATABASE_URL, DEFAULT_DEMO_DATABASE_URL)
 
 demo_url = make_url(DEMO_DATABASE_URL)
 if (
@@ -53,4 +78,12 @@ def init_database(demo: bool | None = None) -> None:
 
     use_demo_database = MODO_DEMONSTRACAO if demo is None else demo
     target_engine = demo_engine if use_demo_database else engine
+    if not use_demo_database:
+        from services.database_backup import create_automatic_backup
+
+        create_automatic_backup(
+            target_engine,
+            BACKUP_DIRECTORY,
+            BACKUP_RETENTION_COUNT,
+        )
     ModelsBase.metadata.create_all(bind=target_engine)

@@ -1,8 +1,11 @@
+from datetime import timedelta
+
 from passlib.hash import pbkdf2_sha256
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from models.entities import Audit, LoginAudit, Permission, Role, RolePermission, User
+from utils.clock import local_now
 
 
 ROLE_PERMISSIONS = {
@@ -63,6 +66,15 @@ def can_access(session: Session, user: User, permission: str) -> bool:
 
 
 def authenticate(session: Session, username: str, password: str) -> User | None:
+    cutoff = local_now() - timedelta(minutes=15)
+    failed_attempts = session.scalar(select(func.count(LoginAudit.id)).where(
+        LoginAudit.username == username,
+        LoginAudit.success.is_(False),
+        LoginAudit.created_at >= cutoff,
+    )) or 0
+    if failed_attempts >= 5:
+        raise ValueError("Muitas tentativas inválidas. Aguarde 15 minutos antes de tentar novamente.")
+
     user = session.scalar(select(User).where(User.username == username, User.active.is_(True)))
     success = bool(user and verify_password(password, user.password_hash))
     session.add(LoginAudit(username=username, success=success))
@@ -74,8 +86,8 @@ def authenticate(session: Session, username: str, password: str) -> User | None:
 
 def create_user(session: Session, username: str, full_name: str, password: str, role_name: str,
                 responsible: str = "SISTEMA_HOMOLOGACAO") -> User:
-    if not username.strip() or not full_name.strip() or len(password) < 8:
-        raise ValueError("Informe usuário, nome e senha com ao menos 8 caracteres.")
+    if not username.strip() or not full_name.strip() or len(password) < 12:
+        raise ValueError("Informe usuário, nome e senha com ao menos 12 caracteres.")
     if session.scalar(select(User.id).where(User.username == username.strip())):
         raise ValueError("Este usuário já está cadastrado.")
     role = session.scalar(select(Role).where(Role.name == role_name))

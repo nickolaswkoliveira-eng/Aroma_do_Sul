@@ -44,7 +44,7 @@ def render_operational_home(session: Session, user_name: str, available_pages: S
     summary = []
     if "Visão geral" in available_pages or "Relatórios" in available_pages:
         revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
-            func.date(Order.created_at) == today)) or 0
+            func.date(Order.created_at) == today, Order.status != "Cancelado")) or 0
         summary.append(("Vendas hoje", currency(float(revenue)), "Total registrado em pedidos"))
     active_orders = session.scalar(select(func.count(Order.id)).where(
         Order.status.in_(("Recebido", "Em preparo")))) or 0
@@ -96,8 +96,10 @@ def render(session: Session) -> None:
     section_heading("Visão geral", "Indicadores gerenciais do negócio")
     today = local_today()
     yesterday = today - timedelta(days=1)
-    revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(func.date(Order.created_at) == today)) or 0
-    yesterday_revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(func.date(Order.created_at) == yesterday)) or 0
+    revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
+        func.date(Order.created_at) == today, Order.status != "Cancelado")) or 0
+    yesterday_revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
+        func.date(Order.created_at) == yesterday, Order.status != "Cancelado")) or 0
     in_progress = session.scalar(select(func.count(Order.id)).where(Order.status.in_(("Recebido", "Em preparo")))) or 0
     waiting = session.scalar(select(func.count(Order.id)).where(Order.status == "Recebido")) or 0
     completed = session.scalar(select(func.count(Order.id)).where(Order.status == "Finalizado",
@@ -109,15 +111,17 @@ def render(session: Session) -> None:
     stock_levels = [stock_level(quantity, minimum) for quantity, minimum in stock_rows]
     critical = sum(level in ("Zerado", "Crítico") for level in stock_levels)
     attention = sum(level == "Atenção" for level in stock_levels)
-    today_orders = session.scalars(select(Order).where(func.date(Order.created_at) == today)).all()
+    today_orders = session.scalars(select(Order).where(
+        func.date(Order.created_at) == today, Order.status != "Cancelado")).all()
     top_product = session.execute(select(Product.name, func.sum(OrderItem.quantity).label("units"))
                                   .join(OrderItem, OrderItem.product_id == Product.id)
                                   .join(Order, Order.id == OrderItem.order_id)
-                                  .where(func.date(Order.created_at) == today)
+                                  .where(func.date(Order.created_at) == today, Order.status != "Cancelado")
                                   .group_by(Product.id).order_by(func.sum(OrderItem.quantity).desc()).limit(1)).first()
     revenue_trend = ""
     previous_7_days = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
-        func.date(Order.created_at) >= today - timedelta(days=7), func.date(Order.created_at) < today)) or 0
+        func.date(Order.created_at) >= today - timedelta(days=7), func.date(Order.created_at) < today,
+        Order.status != "Cancelado")) or 0
     average_day = float(previous_7_days) / 7
     if average_day:
         change = (float(revenue) - average_day) / average_day

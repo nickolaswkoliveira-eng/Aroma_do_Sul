@@ -1,5 +1,6 @@
 from datetime import timedelta
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 import pandas as pd
 import plotly.express as px
@@ -8,7 +9,10 @@ import streamlit as st
 from components.layout import metric_card, section_heading
 from components.charts import apply_chart_theme
 from models.entities import CashSession, Payable, Receivable
-from services.domain import audit, cash_balance, projected_cash, update_overdue_payables
+from services.domain import (
+    add_payable, add_receivable, audit, cash_balance, mark_payable_paid,
+    mark_receivable_received, projected_cash, update_overdue_payables,
+)
 from utils.clock import local_now, local_today
 from utils.formatting import currency, date_only
 from utils.session_state import (
@@ -54,24 +58,29 @@ def render(session: Session) -> None:
         with due_column:
             due = persistent_date_input("Vencimento", key="finance.payable.due", default=local_today() + timedelta(days=7), format="DD/MM/YYYY")
         if st.button("Cadastrar conta", type="primary", key="finance.payable.submit"):
-            session.add(Payable(description=description, category=category, amount=amount, competence=competence, due_date=due))
-            audit(session, "Conta a pagar cadastrada", f"{description} · R$ {amount:.2f}",
-                st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
-            session.commit()
-            st.success("Conta cadastrada.")
-            st.rerun()
+            try:
+                add_payable(
+                    session, description, category, amount, competence, due,
+                    st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
+                )
+                st.success("Conta cadastrada.")
+                st.rerun()
+            except (ValueError, SQLAlchemyError) as error:
+                st.error(str(error))
         rows = session.scalars(select(Payable).order_by(Payable.due_date.desc())).all()
         for row in rows:
             cols = st.columns([3, 2, 1, 1])
             cols[0].write(f"{row.description} · {row.category}")
             cols[1].write(f"{date_only(row.due_date)} · {currency(row.amount)} · {row.status}")
             if row.status != "Pago" and cols[2].button("Marcar pago", key=f"paid_{row.id}"):
-                row.status = "Pago"
-                row.paid_at = local_now()
-                audit(session, "Conta a pagar quitada", row.description,
-                      st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
-                session.commit()
-                st.rerun()
+                try:
+                    mark_payable_paid(
+                        session, row,
+                        st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
+                    )
+                    st.rerun()
+                except (ValueError, SQLAlchemyError) as error:
+                    st.error(str(error))
     with tabs[2]:
         description_column, amount_column, due_column = st.columns([2, 1, 1])
         with description_column:
@@ -83,24 +92,29 @@ def render(session: Session) -> None:
             due = persistent_date_input("Data prevista", key="finance.receivable.due",
                                         default=local_today() + timedelta(days=7), format="DD/MM/YYYY")
         if st.button("Cadastrar receita", type="primary", key="finance.receivable.submit"):
-            session.add(Receivable(description=description, amount=amount, due_date=due))
-            audit(session, "Receita prevista cadastrada", f"{description} · R$ {amount:.2f}",
-                st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
-            session.commit()
-            st.success("Receita cadastrada.")
-            st.rerun()
+            try:
+                add_receivable(
+                    session, description, amount, due,
+                    st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
+                )
+                st.success("Receita cadastrada.")
+                st.rerun()
+            except (ValueError, SQLAlchemyError) as error:
+                st.error(str(error))
         rows = session.scalars(select(Receivable).order_by(Receivable.due_date)).all()
         for row in rows:
             cols = st.columns([3, 2, 1])
             cols[0].write(row.description)
             cols[1].write(f"{date_only(row.due_date)} · {currency(row.amount)} · {row.status}")
             if row.status == "Aberto" and cols[2].button("Recebido", key=f"received_{row.id}"):
-                row.status = "Recebido"
-                row.received_at = local_now()
-                audit(session, "Receita recebida", row.description,
-                      st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
-                session.commit()
-                st.rerun()
+                try:
+                    mark_receivable_received(
+                        session, row,
+                        st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
+                    )
+                    st.rerun()
+                except (ValueError, SQLAlchemyError) as error:
+                    st.error(str(error))
     with tabs[3]:
         days = persistent_select_slider("Horizonte de projeção", [7, 15, 30, 60], key="finance.projection_days",
                         default=30, format_func=lambda value: f"{value} dias")

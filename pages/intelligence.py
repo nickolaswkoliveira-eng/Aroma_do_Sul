@@ -22,12 +22,13 @@ def _collect_insights(session: Session) -> dict[str, list[dict[str, str]]]:
 
     today = local_today()
     recent_start = today - timedelta(days=30)
-    orders_today = session.scalars(select(Order).where(func.date(Order.created_at) == today)).all()
+    orders_today = session.scalars(select(Order).where(
+        func.date(Order.created_at) == today, Order.status != "Cancelado")).all()
     revenue_today = sum(order.total for order in orders_today)
     top_product = session.execute(
         select(Product.id, Product.name, func.sum(OrderItem.quantity * OrderItem.unit_price).label("revenue"))
         .join(OrderItem, OrderItem.product_id == Product.id).join(Order, Order.id == OrderItem.order_id)
-        .where(func.date(Order.created_at) == today).group_by(Product.id)
+        .where(func.date(Order.created_at) == today, Order.status != "Cancelado").group_by(Product.id)
         .order_by(func.sum(OrderItem.quantity * OrderItem.unit_price).desc()).limit(1)
     ).first()
     if top_product and revenue_today:
@@ -41,9 +42,11 @@ def _collect_insights(session: Session) -> dict[str, list[dict[str, str]]]:
     week_start = today - timedelta(days=today.weekday())
     prior_week_start = week_start - timedelta(days=7)
     current_week = session.scalars(select(Order).where(func.date(Order.created_at) >= week_start,
-                                                       func.date(Order.created_at) <= today)).all()
+                                                       func.date(Order.created_at) <= today,
+                                                       Order.status != "Cancelado")).all()
     previous_week = session.scalars(select(Order).where(func.date(Order.created_at) >= prior_week_start,
-                                                        func.date(Order.created_at) < week_start)).all()
+                                                        func.date(Order.created_at) < week_start,
+                                                        Order.status != "Cancelado")).all()
     current_total = sum(order.total for order in current_week)
     previous_total = sum(order.total for order in previous_week)
     if previous_total:
@@ -54,7 +57,8 @@ def _collect_insights(session: Session) -> dict[str, list[dict[str, str]]]:
             "Monitorar capacidade da cozinha." if change > 0 else "Revisar horários, mix de produtos e divulgação.")
 
     recent_orders = session.scalars(select(Order).where(func.date(Order.created_at) >= recent_start,
-                                                       func.date(Order.created_at) <= today)).all()
+                                                       func.date(Order.created_at) <= today,
+                                                       Order.status != "Cancelado")).all()
     if recent_orders:
         recent_items = session.scalars(select(OrderItem).where(
             OrderItem.order_id.in_([order.id for order in recent_orders]))).all()
