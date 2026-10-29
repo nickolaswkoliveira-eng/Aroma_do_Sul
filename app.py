@@ -87,6 +87,7 @@ def main() -> None:
     try:
         init_database()
         session = get_session()
+        seed_access_control(session)
     except (SQLAlchemyError, OSError, ValueError) as error:
         st.error("Banco de dados indisponível ou protegido contra uma configuração insegura.")
         st.caption("As operações foram interrompidas para evitar perda ou gravação duplicada.")
@@ -94,7 +95,6 @@ def main() -> None:
         return
     try:
         if MODO_DEMONSTRACAO:
-            seed_access_control(session)
             st.warning("AMBIENTE DE DEMONSTRAÇÃO · Os dados são isolados em banco separado.", icon="🧪")
         current_user = None
         if not MODO_HOMOLOGACAO:
