@@ -3,28 +3,58 @@ from sqlalchemy.orm import Session
 import streamlit as st
 
 from components.layout import metric_card, section_heading
+from database.connection import get_session
 from models.entities import Category, Comanda, Customer, Order, OrderItem, Product, Stock
 from services.domain import create_order
 from utils.clock import local_today
 from utils.formatting import currency, date_time
 from utils.session_state import (
     persist_value, persistent_number_input, persistent_selectbox, persistent_text_input,
-    persistent_widget,
+    persistent_widget, persistent_toggle,
 )
+
+
+def _render_live_orders_panel_content(session: Session) -> None:
+    active_orders = session.scalar(select(func.count(Order.id)).where(Order.status.in_(("Recebido", "Em preparo")))) or 0
+    waiting_orders = session.scalar(select(func.count(Order.id)).where(Order.status == "Recebido")) or 0
+    completed_today = session.scalar(select(func.count(Order.id)).where(
+        Order.status == "Finalizado", func.date(Order.finished_at) == local_today())) or 0
+    status_cols = st.columns(3)
+    with status_cols[0]:
+        metric_card("Pedidos ativos", str(active_orders), "Em atendimento")
+    with status_cols[1]:
+        metric_card("Aguardando preparo", str(waiting_orders), "Na fila da cozinha")
+    with status_cols[2]:
+        metric_card("Concluídos hoje", str(completed_today), "Finalizados")
+    latest_orders = session.scalars(select(Order).order_by(Order.created_at.desc()).limit(8)).all()
+    with st.expander("Atualização em tempo real", expanded=False):
+        st.caption("Pedidos do celular aparecem aqui automaticamente (atualização a cada 5 segundos).")
+        for order in latest_orders:
+            st.write(f"**#{order.id} · {order.status}** · {date_time(order.created_at)} · {currency(order.total)}")
+
+
+@st.fragment(run_every="5s")
+def _render_live_orders_panel_auto() -> None:
+    session = get_session()
+    try:
+        _render_live_orders_panel_content(session)
+    finally:
+        session.close()
 
 
 def render(session: Session) -> None:
     section_heading("Pedidos", "Monte o pedido e acompanhe o atendimento")
     if "cart" not in st.session_state:
         st.session_state.cart = {}
-    active_orders = session.scalar(select(func.count(Order.id)).where(Order.status.in_(("Recebido", "Em preparo")))) or 0
-    waiting_orders = session.scalar(select(func.count(Order.id)).where(Order.status == "Recebido")) or 0
-    completed_today = session.scalar(select(func.count(Order.id)).where(
-        Order.status == "Finalizado", func.date(Order.finished_at) == local_today())) or 0
-    status_cols = st.columns(3)
-    with status_cols[0]: metric_card("Pedidos ativos", str(active_orders), "Em atendimento")
-    with status_cols[1]: metric_card("Aguardando preparo", str(waiting_orders), "Na fila da cozinha")
-    with status_cols[2]: metric_card("Concluídos hoje", str(completed_today), "Finalizados")
+    live_refresh = persistent_toggle(
+        "Atualizar pedidos em tempo real (5s)",
+        key="orders.live_refresh",
+        default=True,
+    )
+    if live_refresh:
+        _render_live_orders_panel_auto()
+    else:
+        _render_live_orders_panel_content(session)
     products = session.scalars(select(Product).where(Product.active.is_(True), Product.sale_price > 0).order_by(Product.name)).all()
     categories = session.scalars(select(Category).where(Category.active.is_(True)).order_by(Category.name)).all()
     open_comandas = session.scalars(
