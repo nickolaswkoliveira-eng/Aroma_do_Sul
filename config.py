@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 from pathlib import Path
 
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Sao_Paulo")
@@ -75,9 +76,25 @@ DEMO_DATABASE_URL = os.getenv("DEMO_DATABASE_URL", DEFAULT_DEMO_DATABASE_URL)
 AUTH_SESSION_TTL_DAYS = int(os.getenv("AUTH_SESSION_TTL_DAYS", "14"))
 if AUTH_SESSION_TTL_DAYS < 1:
     raise ValueError("AUTH_SESSION_TTL_DAYS deve ser maior que zero.")
-AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "__Host-cafe_session")
 AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "Strict")
-AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true").strip().lower() == "true"
+cookie_secure_raw = os.getenv("AUTH_COOKIE_SECURE")
+if cookie_secure_raw is None:
+    AUTH_COOKIE_SECURE = IS_PRODUCTION
+else:
+    cookie_secure_value = cookie_secure_raw.strip().lower()
+    if cookie_secure_value not in {"true", "false"}:
+        raise ValueError("AUTH_COOKIE_SECURE deve ser 'true' ou 'false'.")
+    AUTH_COOKIE_SECURE = cookie_secure_value == "true"
+AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "__Host-cafe_session" if AUTH_COOKIE_SECURE else "cafe_session")
+if not AUTH_COOKIE_SECURE and AUTH_COOKIE_NAME.startswith(("__Host-", "__Secure-")):
+    raise ValueError(
+        "Cookies com prefixo __Host- ou __Secure- exigem AUTH_COOKIE_SECURE=true."
+    )
+if IS_PRODUCTION and not AUTH_COOKIE_SECURE:
+    warnings.warn(
+        "APP_ENV=production com AUTH_COOKIE_SECURE=false expõe a sessão em conexões não HTTPS.",
+        stacklevel=1,
+    )
 BACKUP_DIRECTORY = Path(
     os.getenv("BACKUP_DIRECTORY", str(PROJECT_ROOT / "backups"))
 ).expanduser()
