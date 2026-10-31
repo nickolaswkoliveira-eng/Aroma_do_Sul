@@ -6,10 +6,24 @@ from sqlalchemy.orm import Session
 import streamlit as st
 
 from components.layout import section_heading
-from models.entities import CashSession, Order, OrderItem, Payable, Product, Stock
+from models.entities import CashMovement, CashSession, Order, OrderItem, Payable, Product, Stock
 from services.domain import cash_balance, cmv_for_period, purchase_recommendations, stock_level
 from utils.clock import local_now, local_today
 from utils.formatting import currency
+
+
+SALE_METHODS = ("Dinheiro", "Pix", "Crédito", "Débito")
+
+
+def _sales_total_for_day(session: Session, target_day) -> float:
+    return float(session.scalar(
+        select(func.coalesce(func.sum(CashMovement.amount), 0)).where(
+            CashMovement.movement_type == "Entrada",
+            CashMovement.method.in_(SALE_METHODS),
+            CashMovement.description.like("Comanda #%"),
+            func.date(CashMovement.created_at) == target_day,
+        )
+    ) or 0)
 
 
 def render_operational_home(session: Session, user_name: str, available_pages: Sequence[str],
@@ -37,8 +51,14 @@ def render_operational_home(session: Session, user_name: str, available_pages: S
             action_columns = st.columns(len(available_actions))
             for column, (label, destination, button_type) in zip(action_columns, available_actions):
                 with column:
-                    if st.button(label, key=f"home_action_{destination}", type=button_type, width="stretch"):
-                        on_navigate(destination)
+                    st.button(
+                        label,
+                        key=f"home_action_{destination}",
+                        type=button_type,
+                        width="stretch",
+                        on_click=on_navigate,
+                        args=(destination,),
+                    )
 
     _render_operational_home_summary(session, available_pages, on_navigate)
 
@@ -48,9 +68,8 @@ def _render_operational_home_summary(session: Session, available_pages: Sequence
     today = local_today()
     summary = []
     if "Visão geral" in available_pages or "Relatórios" in available_pages:
-        revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
-            func.date(Order.created_at) == today, Order.status != "Cancelado")) or 0
-        summary.append(("Vendas hoje", currency(float(revenue)), "Total registrado em pedidos"))
+        revenue = _sales_total_for_day(session, today)
+        summary.append(("Vendas hoje", currency(revenue), "Total recebido no caixa por comandas"))
     active_orders = session.scalar(select(func.count(Order.id)).where(
         Order.status.in_(("Recebido", "Em preparo")))) or 0
     if any(page in available_pages for page in ("Pedidos", "Cozinha")):
@@ -94,17 +113,19 @@ def _render_operational_home_summary(session: Session, available_pages: Sequence
             f"Ação recomendada: comprar {recommendation['suggested_quantity']:.0f} "
             f"{product.unit} de {product.name}. Abra Estoque para ver detalhes."
         )
-        if st.button("Ver recomendações de estoque", key="home.stock_recommendations"):
-            on_navigate("Estoque")
+        st.button(
+            "Ver recomendações de estoque",
+            key="home.stock_recommendations",
+            on_click=on_navigate,
+            args=("Estoque",),
+        )
 
 def render(session: Session) -> None:
     section_heading("Visão geral", "Indicadores gerenciais do negócio")
     today = local_today()
     yesterday = today - timedelta(days=1)
-    revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
-        func.date(Order.created_at) == today, Order.status != "Cancelado")) or 0
-    yesterday_revenue = session.scalar(select(func.coalesce(func.sum(Order.total), 0)).where(
-        func.date(Order.created_at) == yesterday, Order.status != "Cancelado")) or 0
+    revenue = _sales_total_for_day(session, today)
+    yesterday_revenue = _sales_total_for_day(session, yesterday)
     in_progress = session.scalar(select(func.count(Order.id)).where(Order.status.in_(("Recebido", "Em preparo")))) or 0
     waiting = session.scalar(select(func.count(Order.id)).where(Order.status == "Recebido")) or 0
     completed = session.scalar(select(func.count(Order.id)).where(Order.status == "Finalizado",

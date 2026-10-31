@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from components.layout import metric_card, module_card, section_heading
@@ -171,6 +172,34 @@ def _stock_report(session: Session) -> None:
                        "Consumo/dia": round(avg, 2), "Dias de cobertura": round(stock.quantity / avg, 1) if avg else None,
                        "Comprar": max(0, round(stock.minimum_quantity * 2 - stock.quantity, 2))})
     if output:
+        frame = pd.DataFrame(output)
+        chart_data = frame.dropna(subset=["Dias de cobertura"]).copy()
+        if not chart_data.empty:
+            st.subheader("Cobertura de estoque (dias)")
+            chart_data = chart_data.sort_values("Dias de cobertura", ascending=True).head(12)
+            fig = px.bar(
+                chart_data,
+                x="Dias de cobertura",
+                y="Produto",
+                orientation="h",
+                color="Dias de cobertura",
+                color_continuous_scale=CHART_SCALE,
+            )
+            fig.update_layout(
+                height=420,
+                margin=dict(l=0, r=0, t=10, b=0),
+                yaxis={"categoryorder": "array", "categoryarray": chart_data["Produto"].tolist()},
+                coloraxis_colorbar_title="Dias",
+            )
+            fig.add_vline(
+                x=7,
+                line_dash="dash",
+                line_color="#7A5A3E",
+                annotation_text="Meta 7 dias",
+                annotation_position="top right",
+            )
+            apply_chart_theme(fig)
+            st.plotly_chart(fig, width="stretch")
         st.dataframe(output, width="stretch", hide_index=True)
 
 
@@ -242,41 +271,72 @@ def _dre_report(session: Session) -> None:
              ("(-) Impostos", 0), ("Lucro líquido", gross - costs - expense_total)]
     st.dataframe([{"Demonstrativo": label, "Valor": currency(value),
                    "% Receita líquida": f"{value / gross:.1%}" if gross else "-"} for label, value in lines], width="stretch", hide_index=True)
-    if gross:
-        vertical = pd.DataFrame([{"Linha": label, "Percentual": value / gross * 100} for label, value in lines if label not in ("Receita bruta", "Receita líquida")])
-        fig = px.bar(vertical, x="Linha", y="Percentual", color="Percentual", color_continuous_scale=CHART_SCALE)
-        fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0))
-        apply_chart_theme(fig)
-        st.plotly_chart(fig, width="stretch")
+    waterfall = go.Figure(
+        go.Waterfall(
+            name="DRE",
+            orientation="v",
+            measure=["absolute", "relative", "relative", "total"],
+            x=["Receita líquida", "Custos", "Despesas", "Lucro operacional"],
+            y=[gross, -costs, -expense_total, gross - costs - expense_total],
+            connector={"line": {"color": "rgba(48,37,29,0.35)"}},
+            increasing={"marker": {"color": CHART_COLORS[0]}},
+            decreasing={"marker": {"color": CHART_COLORS[2]}},
+            totals={"marker": {"color": CHART_COLORS[1]}},
+            text=[
+                currency(gross),
+                currency(-costs),
+                currency(-expense_total),
+                currency(gross - costs - expense_total),
+            ],
+            textposition="outside",
+        )
+    )
+    waterfall.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0), showlegend=False)
+    apply_chart_theme(waterfall)
+    st.plotly_chart(waterfall, width="stretch")
     st.caption("Descontos e impostos estão zerados até que sejam parametrizados. DRE gerencial estimada com custos e despesas cadastrados.")
 
 
 def _peak_report(session: Session) -> None:
-    start, end = _period()
+    window_label = persistent_selectbox(
+        "Janela de análise",
+        ["7 dias", "15 dias", "30 dias"],
+        key="reports.peak_window",
+        default="7 dias",
+    )
+    window_days = int(window_label.split()[0])
+    end = local_today()
+    start = end - timedelta(days=window_days - 1)
     orders = _sales(session, start, end)
     if not orders:
         st.info("Sem dados para identificar horários de pico.")
         return
     hours = pd.DataFrame([{"Hora": order.created_at.hour, "Pedidos": 1} for order in orders])
-    summary = hours.groupby("Hora", as_index=False)["Pedidos"].sum()
+    summary = hours.groupby("Hora", as_index=False)["Pedidos"].sum().sort_values("Hora")
     busiest = summary.loc[summary["Pedidos"].idxmax()]
     quietest = summary.loc[summary["Pedidos"].idxmin()]
-    st.caption(f"Maior movimento: {int(busiest['Hora']):02d}h · Menor movimento (entre horários com vendas): {int(quietest['Hora']):02d}h")
-    hourly = pd.DataFrame({
-        "Hora": [f"{hour:02d}:00" for hour in range(24)],
-        "Pedidos": [int(summary.loc[summary["Hora"] == hour, "Pedidos"].sum()) for hour in range(24)],
-    })
-    bar = px.bar(hourly, x="Hora", y="Pedidos", color="Pedidos", color_continuous_scale=CHART_SCALE)
-    bar.update_layout(height=280, margin=dict(l=0, r=0, t=8, b=0), coloraxis_colorbar_title="Pedidos")
+    st.caption(
+        f"Período: {start:%d/%m/%Y} a {end:%d/%m/%Y} · "
+        f"Maior movimento: {int(busiest['Hora']):02d}h · "
+        f"Menor movimento (com vendas): {int(quietest['Hora']):02d}h"
+    )
+    summary["Faixa"] = summary["Hora"].map(lambda hour: f"{int(hour):02d}h")
+    summary["Rótulo"] = summary["Pedidos"].map(lambda count: "█" * min(int(count), 28))
+    bar = px.bar(
+        summary,
+        x="Pedidos",
+        y="Faixa",
+        orientation="h",
+        text="Rótulo",
+        color="Pedidos",
+        color_continuous_scale=CHART_SCALE,
+    )
+    bar.update_layout(
+        height=360,
+        margin=dict(l=0, r=0, t=8, b=0),
+        coloraxis_colorbar_title="Pedidos",
+        yaxis={"categoryorder": "array", "categoryarray": summary["Faixa"].tolist()},
+    )
+    bar.update_traces(textposition="outside", cliponaxis=False)
     apply_chart_theme(bar)
     st.plotly_chart(bar, width="stretch")
-    weekday_names = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
-    heatmap_data = pd.DataFrame([{"Hora": order.created_at.hour, "Dia": weekday_names[order.created_at.weekday()]}
-                                 for order in orders])
-    fig = px.density_heatmap(heatmap_data, x="Hora", y="Dia", nbinsx=24,
-                             category_orders={"Dia": weekday_names}, color_continuous_scale=CHART_SCALE)
-    fig.update_layout(height=390, xaxis={"tickmode": "array", "tickvals": list(range(24)),
-                                         "ticktext": [f"{hour:02d}:00" for hour in range(24)]},
-                      coloraxis_colorbar_title="Pedidos")
-    apply_chart_theme(fig)
-    st.plotly_chart(fig, width="stretch")
