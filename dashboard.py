@@ -51,9 +51,14 @@ def render_operational_home(session: Session, user_name: str, available_pages: S
             action_columns = st.columns(len(available_actions))
             for column, (label, destination, button_type) in zip(action_columns, available_actions):
                 with column:
-                    if st.button(label, key=f"home_action_{destination}", type=button_type, width="stretch"):
-                        on_navigate(destination)
-                        st.rerun()
+                    st.button(
+                        label,
+                        key=f"home_action_{destination}",
+                        type=button_type,
+                        width="stretch",
+                        on_click=on_navigate,
+                        args=(destination,),
+                    )
 
     _render_operational_home_summary(session, available_pages, on_navigate)
 
@@ -108,9 +113,12 @@ def _render_operational_home_summary(session: Session, available_pages: Sequence
             f"Ação recomendada: comprar {recommendation['suggested_quantity']:.0f} "
             f"{product.unit} de {product.name}. Abra Estoque para ver detalhes."
         )
-        if st.button("Ver recomendações de estoque", key="home.stock_recommendations"):
-            on_navigate("Estoque")
-            st.rerun()
+        st.button(
+            "Ver recomendações de estoque",
+            key="home.stock_recommendations",
+            on_click=on_navigate,
+            args=("Estoque",),
+        )
 
 def render(session: Session) -> None:
     section_heading("Visão geral", "Indicadores gerenciais do negócio")
