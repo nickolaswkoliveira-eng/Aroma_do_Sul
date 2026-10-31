@@ -233,6 +233,8 @@ def main() -> None:
                 list(visible),
                 _navigate,
             )
+            if st.session_state.active_page != selected:
+                st.rerun()
             return
         render_function, _, _, _ = visible[selected]
         if selected == "Comandas":
