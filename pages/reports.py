@@ -315,10 +315,13 @@ def _peak_report(session: Session) -> None:
     summary = hours.groupby("Hora", as_index=False)["Pedidos"].sum().sort_values("Hora")
     busiest = summary.loc[summary["Pedidos"].idxmax()]
     quietest = summary.loc[summary["Pedidos"].idxmin()]
-    st.caption(
+    st.markdown(
+        f"<div style='color:#4A3527;font-weight:600;'>"
         f"Período: {start:%d/%m/%Y} a {end:%d/%m/%Y} · "
         f"Maior movimento: {int(busiest['Hora']):02d}h · "
         f"Menor movimento (com vendas): {int(quietest['Hora']):02d}h"
+        "</div>",
+        unsafe_allow_html=True,
     )
     summary["Faixa"] = summary["Hora"].map(lambda hour: f"{int(hour):02d}h")
     summary["Tipo"] = "Demais horários"
@@ -331,9 +334,9 @@ def _peak_report(session: Session) -> None:
         orientation="h",
         color="Tipo",
         color_discrete_map={
-            "Pico de pedidos": "#CBB499",
-            "Menor movimento": "#8A7663",
-            "Demais horários": "#5E7B63",
+            "Pico de pedidos": "#B08968",
+            "Menor movimento": "#6D4C41",
+            "Demais horários": "#3F6B52",
         },
         category_orders={"Tipo": ["Pico de pedidos", "Menor movimento", "Demais horários"]},
         text="Pedidos",
@@ -341,11 +344,19 @@ def _peak_report(session: Session) -> None:
     bar.update_layout(
         height=360,
         margin=dict(l=0, r=0, t=8, b=0),
-        xaxis_title="Quantidade de pedidos",
-        yaxis_title="Faixa",
         legend_title_text="Legenda",
-        yaxis={"categoryorder": "array", "categoryarray": summary["Faixa"].tolist()},
+        font={"color": "#30251D"},
+        legend={
+            "font": {"color": "#30251D", "size": 14},
+            "title": {"font": {"color": "#30251D", "size": 15}},
+        },
+        xaxis={"title": {"text": "Quantidade de pedidos", "font": {"color": "#30251D"}},
+               "tickfont": {"color": "#30251D"}},
+        yaxis={"title": {"text": "Faixa", "font": {"color": "#30251D"}},
+               "tickfont": {"color": "#30251D"},
+               "categoryorder": "array",
+               "categoryarray": summary["Faixa"].tolist()},
     )
-    bar.update_traces(textposition="outside", cliponaxis=False, texttemplate="%{text}")
+    bar.update_traces(textposition="outside", cliponaxis=False, texttemplate="%{text}", textfont={"color": "#30251D"})
     apply_chart_theme(bar)
     st.plotly_chart(bar, width="stretch", config={"displayModeBar": False})
