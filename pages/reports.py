@@ -321,22 +321,31 @@ def _peak_report(session: Session) -> None:
         f"Menor movimento (com vendas): {int(quietest['Hora']):02d}h"
     )
     summary["Faixa"] = summary["Hora"].map(lambda hour: f"{int(hour):02d}h")
-    summary["Rótulo"] = summary["Pedidos"].map(lambda count: "█" * min(int(count), 28))
+    summary["Tipo"] = "Demais horários"
+    summary.loc[summary["Hora"] == int(busiest["Hora"]), "Tipo"] = "Pico de pedidos"
+    summary.loc[summary["Hora"] == int(quietest["Hora"]), "Tipo"] = "Menor movimento"
     bar = px.bar(
         summary,
         x="Pedidos",
         y="Faixa",
         orientation="h",
-        text="Rótulo",
-        color="Pedidos",
-        color_continuous_scale=CHART_SCALE,
+        color="Tipo",
+        color_discrete_map={
+            "Pico de pedidos": "#CBB499",
+            "Menor movimento": "#8A7663",
+            "Demais horários": "#5E7B63",
+        },
+        category_orders={"Tipo": ["Pico de pedidos", "Menor movimento", "Demais horários"]},
+        text="Pedidos",
     )
     bar.update_layout(
         height=360,
         margin=dict(l=0, r=0, t=8, b=0),
-        coloraxis_colorbar_title="Pedidos",
+        xaxis_title="Quantidade de pedidos",
+        yaxis_title="Faixa",
+        legend_title_text="Legenda",
         yaxis={"categoryorder": "array", "categoryarray": summary["Faixa"].tolist()},
     )
-    bar.update_traces(textposition="outside", cliponaxis=False)
+    bar.update_traces(textposition="outside", cliponaxis=False, texttemplate="%{text}")
     apply_chart_theme(bar)
-    st.plotly_chart(bar, width="stretch")
+    st.plotly_chart(bar, width="stretch", config={"displayModeBar": False})
