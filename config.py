@@ -6,12 +6,6 @@ from pathlib import Path
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Sao_Paulo")
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV in {"prod", "production"}
-MODULO_USUARIOS = False
-MODULO_FINANCEIRO = True
-MODULO_DRE = True
-MODULO_INTELIGENCIA = True
-MODULO_NFE = False
-MODULO_WHATSAPP = False
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -47,8 +41,21 @@ def _setting(name: str, default: str | None = None) -> str | None:
     return str(secret) if secret else default
 
 
-MODO_HOMOLOGACAO = str(_setting("MODO_HOMOLOGACAO", "true")).lower() == "true"
-MODO_DEMONSTRACAO = str(_setting("MODO_DEMONSTRACAO", "false")).lower() == "true"
+def _bool_setting(name: str, default: bool) -> bool:
+    value = str(_setting(name, "true" if default else "false")).strip().lower()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} deve ser 'true' ou 'false'.")
+    return value == "true"
+
+
+MODULO_USUARIOS = _bool_setting("MODULO_USUARIOS", True)
+MODULO_FINANCEIRO = _bool_setting("MODULO_FINANCEIRO", True)
+MODULO_DRE = _bool_setting("MODULO_DRE", True)
+MODULO_INTELIGENCIA = _bool_setting("MODULO_INTELIGENCIA", True)
+MODULO_NFE = _bool_setting("MODULO_NFE", False)
+MODULO_WHATSAPP = _bool_setting("MODULO_WHATSAPP", False)
+MODO_HOMOLOGACAO = _bool_setting("MODO_HOMOLOGACAO", _running_tests())
+MODO_DEMONSTRACAO = _bool_setting("MODO_DEMONSTRACAO", False)
 
 
 DEFAULT_DATABASE_URL = f"sqlite:///{(PROJECT_ROOT / 'cafeteria.db').as_posix()}"

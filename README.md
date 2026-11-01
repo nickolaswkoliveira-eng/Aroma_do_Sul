@@ -76,7 +76,7 @@ Confira contagens e totais de vendas no banco de teste. Repita o teste ao menos 
 
 ## Homologação e produção
 
-`MODO_HOMOLOGACAO = True` mantém o login desativado, permissões ignoradas e registra operações com `SISTEMA_HOMOLOGACAO`. Para ativar o login, defina `MODO_HOMOLOGACAO=False` em `config.py` ou use a variável de ambiente `MODO_HOMOLOGACAO=false`. Na primeira abertura será solicitado o cadastro do administrador. Perfis e permissões são inicializados no banco; o módulo administrativo de usuários permanece oculto até `MODULO_USUARIOS=True`.
+`MODO_HOMOLOGACAO = False` ativa o login por padrão fora dos testes; com isso, permissões por perfil são aplicadas e operações ficam auditadas com o usuário autenticado. Para desativar login em cenários controlados, use `MODO_HOMOLOGACAO=true`. Na primeira abertura será solicitado o cadastro do administrador. Perfis e permissões são inicializados no banco. O módulo de usuários pode ser controlado por `MODULO_USUARIOS` (padrão `true`), mas apenas o perfil `ADMINISTRADOR` consegue acessá-lo e alterar contas.
 
 No modo com login ativo, a sessão autenticada usa token opaco persistido em cookie com renovação deslizante por `AUTH_SESSION_TTL_DAYS`. Por padrão, `AUTH_COOKIE_SECURE` segue o ambiente (`false` em desenvolvimento e `true` em produção), e o nome padrão do cookie muda entre `cafe_session` (sem prefixo) e `__Host-cafe_session` (prefixo seguro), evitando perda de sessão em `http://localhost`. `SameSite` continua configurável por `AUTH_COOKIE_SAMESITE`. O logout revoga a sessão no banco e remove o cookie.
 
@@ -93,7 +93,7 @@ Com o modo ativo, **Configurações → Homologação** oferece geração, limpe
 
 Datas e horários de negócio usam `APP_TIMEZONE`, com padrão `America/Sao_Paulo`. Os valores são gravados como horários locais sem informação de fuso na coluna SQLite; dados antigos são preservados e interpretados conforme o fuso configurado, sem conversão retroativa.
 
-Os módulos de Financeiro, DRE e Inteligência são controlados por flags em `config.py`. NFe e WhatsApp estão desabilitados nesta versão.
+Os módulos de Usuários, Financeiro, DRE e Inteligência são controlados por flags (`MODULO_USUARIOS`, `MODULO_FINANCEIRO`, `MODULO_DRE`, `MODULO_INTELIGENCIA`). NFe e WhatsApp estão desabilitados nesta versão.
 
 ## Navegação
 

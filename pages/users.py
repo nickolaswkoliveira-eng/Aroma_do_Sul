@@ -10,6 +10,9 @@ from utils.session_state import persistent_selectbox, persistent_text_input
 
 def render(session: Session) -> None:
     section_heading("Usuários", "Administração de acesso e perfis")
+    if st.session_state.get("current_role") != "ADMINISTRADOR":
+        st.error("Apenas administradores podem gerenciar usuários.")
+        return
     roles = session.scalars(select(Role).order_by(Role.name)).all()
     username = persistent_text_input("Usuário", key="users.new.username")
     full_name = persistent_text_input("Nome completo", key="users.new.full_name")
@@ -53,8 +56,8 @@ def render(session: Session) -> None:
                 session.commit()
                 st.rerun()
             if new_password and st.button("Aplicar reset de senha", key=f"reset_{user.id}"):
-                if len(new_password) < 8:
-                    st.error("A nova senha precisa ter ao menos 8 caracteres.")
+                if len(new_password) < 12:
+                    st.error("A nova senha precisa ter ao menos 12 caracteres.")
                 else:
                     user.password_hash = hash_password(new_password)
                     session.add(Audit(responsible=st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
