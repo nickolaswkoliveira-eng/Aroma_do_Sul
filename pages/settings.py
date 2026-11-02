@@ -12,7 +12,12 @@ from config import (
     MODO_DEMONSTRACAO,
 )
 from database.connection import demo_engine, engine
-from models.entities import Audit, Category, DemoRecord, Order, Product
+from models.entities import Audit, Category, DemoRecord, Order, Product, User
+from services.auth import verify_password
+from services.data_reset import (
+    RESET_CONFIRMATION_PHRASE, build_backup_download, clear_all_data, count_resettable_records,
+)
+from services.postgres_backup import BackupError
 from services.demo_data import populate_demo_data
 from services.database_backup import export_sqlite_backup, latest_automatic_backup
 from services.database_health import database_health
@@ -173,6 +178,63 @@ def _render_homologation(session) -> None:
             st.error(f"Não foi possível importar o backup: {error}")
 
 
+def _render_data_reset(session) -> None:
+    if st.session_state.get("current_role") != "ADMINISTRADOR":
+        return
+    st.subheader("Zona de perigo")
+    with st.expander("Limpar todos os dados"):
+        st.error(
+            "Remove pedidos, comandas, caixa, financeiro, estoque, produtos, categorias, "
+            "fichas técnicas, clientes e o histórico de auditoria. Usuários, perfis e "
+            "permissões são mantidos. Esta ação não pode ser desfeita."
+        )
+        counts = count_resettable_records(session)
+        st.caption(f"Registros que serão apagados: {sum(counts.values())}")
+        st.markdown("**Antes de limpar: baixe um backup**")
+        if st.button("Preparar backup completo", key="settings.data_reset_backup"):
+            try:
+                with st.spinner("Gerando backup..."):
+                    st.session_state["settings.reset_backup"] = build_backup_download(
+                        engine, DATABASE_URL, local_now(),
+                    )
+            except (BackupError, SQLAlchemyError, OSError, ValueError, sqlite3.Error) as error:
+                st.session_state.pop("settings.reset_backup", None)
+                st.error(f"Não foi possível gerar o backup: {error}")
+        prepared_backup = st.session_state.get("settings.reset_backup")
+        if prepared_backup:
+            data, file_name, mime = prepared_backup
+            st.download_button("Baixar backup", data=data, file_name=file_name, mime=mime,
+                               key="settings.reset_backup_download")
+            st.caption("O arquivo contém todos os dados e os usuários (com senhas em hash). Guarde-o em local seguro.")
+        user_id = st.session_state.get("user_id")
+        user = session.get(User, user_id) if user_id else None
+        password = ""
+        if user is not None:
+            password = st.text_input("Sua senha", type="password", key="settings.data_reset_password")
+        phrase = st.text_input(
+            f'Digite "{RESET_CONFIRMATION_PHRASE}" para confirmar',
+            key="settings.data_reset_phrase",
+        )
+        if st.button(
+            "Limpar todos os dados",
+            type="primary",
+            disabled=phrase != RESET_CONFIRMATION_PHRASE,
+            key="settings.data_reset_submit",
+        ):
+            if user is not None and not verify_password(password, user.password_hash):
+                st.error("Senha incorreta.")
+                return
+            try:
+                removed = clear_all_data(session, st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
+            except (SQLAlchemyError, ValueError) as error:
+                st.error(f"Não foi possível limpar os dados: {error}")
+                return
+            st.session_state.cart = {}
+            st.session_state.pop("settings.reset_backup", None)
+            st.session_state.pop("orders.favorites", None)
+            st.success(f"Limpeza concluída: {sum(removed.values())} registros removidos.")
+
+
 def render(session) -> None:
     section_heading("Configurações", "Parâmetros gerais do ambiente")
     if st.session_state.get("current_role") not in {"ADMINISTRADOR", "GERENTE"}:
@@ -288,6 +350,7 @@ def render(session) -> None:
             )
     if MODO_DEMONSTRACAO:
         _render_homologation(session)
+    _render_data_reset(session)
     st.subheader("Auditoria recente")
     page_size = 15
     total = session.scalar(select(func.count(Audit.id))) or 0
