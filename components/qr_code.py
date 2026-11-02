@@ -4,12 +4,20 @@ import streamlit as st
 
 
 def render_qr() -> None:
-    with st.expander("Compartilhar pedidos por QR Code"):
-        st.caption("Informe o endereço de rede do Streamlit acessível pelo celular do cliente.")
-        address = st.text_input("URL pública da tela de pedidos", placeholder="http://192.168.0.10:8501")
+    with st.expander("QR Code de atendimento por mesa"):
+        st.caption(
+            "Informe o endereço de rede do Streamlit acessível no celular do atendente. "
+            "Cada QR abre a mesa correspondente no modo rápido (pedidos, comandas e status)."
+        )
+        address = st.text_input("URL pública da aplicação", placeholder="http://192.168.0.10:8501")
         if address:
-            image = qrcode.make(address.rstrip("/") + "/?pagina=Pedidos")
-            buffer = BytesIO()
-            image.save(buffer, format="PNG")
-            st.image(buffer.getvalue(), width=180, caption="Aponte a câmera para abrir os pedidos")
-            st.code(address.rstrip("/") + "/?pagina=Pedidos")
+            base = address.rstrip("/")
+            columns = st.columns(5)
+            for table_number in range(1, 6):
+                url = f"{base}/?pagina=Pedidos&acesso=atendimento&mesa={table_number:02d}"
+                image = qrcode.make(url)
+                buffer = BytesIO()
+                image.save(buffer, format="PNG")
+                with columns[table_number - 1]:
+                    st.image(buffer.getvalue(), width=150, caption=f"Mesa {table_number:02d}")
+            st.code(f"{base}/?pagina=Pedidos&acesso=atendimento&mesa=01")

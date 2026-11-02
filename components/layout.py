@@ -60,6 +60,19 @@ def configure_page() -> None:
     div.stButton > button[kind="primary"] { background-color: var(--espresso) !important; border-color: var(--espresso); color: #FFFFFF !important; }
     div.stButton > button:hover { border-color: var(--accent); color: var(--espresso) !important; background: #F2EBE2 !important; }
     div.stButton > button[kind="primary"]:hover { background: var(--accent) !important; color: #FFFFFF !important; }
+    div[data-testid="stDownloadButton"] > button, div[data-testid="stFormSubmitButton"] > button, div[data-testid="stLinkButton"] a {
+      border-radius: 8px; min-height: 2.5rem; background-color: var(--surface) !important; border: 1px solid var(--line) !important; color: var(--ink) !important;
+    }
+    div[data-testid="stDownloadButton"] > button *, div[data-testid="stFormSubmitButton"] > button *, div[data-testid="stLinkButton"] a * { color: inherit !important; }
+    div[data-testid="stDownloadButton"] > button:hover, div[data-testid="stFormSubmitButton"] > button:hover, div[data-testid="stLinkButton"] a:hover {
+      background-color: #F2EBE2 !important; border-color: var(--accent) !important; color: var(--espresso) !important;
+    }
+    div[data-testid="stDownloadButton"] > button[kind="primary"], div[data-testid="stFormSubmitButton"] > button[kind="primary"], div[data-testid="stLinkButton"] a[kind="primary"] {
+      background-color: var(--espresso) !important; border-color: var(--espresso) !important; color: #FFFFFF !important;
+    }
+    div[data-testid="stDownloadButton"] > button[kind="primary"]:hover, div[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover, div[data-testid="stLinkButton"] a[kind="primary"]:hover {
+      background-color: var(--accent) !important; color: #FFFFFF !important;
+    }
     [data-testid="stSelectbox"] [data-baseweb="select"] > div { background-color: var(--surface); border-color: var(--line); color: var(--ink) !important; }
     [data-testid="stSelectbox"] [data-baseweb="select"] input { color: var(--ink) !important; }
     [data-testid="stWidgetLabel"] p, label, legend { color: var(--ink) !important; }
