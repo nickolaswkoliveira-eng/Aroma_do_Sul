@@ -20,6 +20,8 @@ from utils.money import money, money_float, money_sum
 
 
 STATUSES = ("Recebido", "Em preparo", "Pronto", "Entregue", "Finalizado", "Cancelado")
+TABLE_MIN = 1
+TABLE_MAX = 5
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -150,17 +152,53 @@ def _lock_open_cash(session: Session) -> CashSession | None:
     return session.scalar(query)
 
 
+def normalize_table_number(table_number: int | None) -> int | None:
+    if table_number is None:
+        return None
+    if isinstance(table_number, bool):
+        raise ValueError("Mesa inválida.")
+    normalized = int(table_number)
+    if normalized < TABLE_MIN or normalized > TABLE_MAX:
+        raise ValueError(f"Mesa inválida. Use um número entre {TABLE_MIN:02d} e {TABLE_MAX:02d}.")
+    return normalized
+
+
+def _validate_open_table_conflict(
+    session: Session,
+    table_number: int | None,
+    *,
+    ignore_comanda_id: int | None = None,
+) -> None:
+    if table_number is None:
+        return
+    query = select(Comanda.id).where(
+        Comanda.status == "Aberta",
+        Comanda.table_number == table_number,
+    )
+    if ignore_comanda_id is not None:
+        query = query.where(Comanda.id != ignore_comanda_id)
+    conflict = session.scalar(query.limit(1))
+    if conflict is not None:
+        raise ValueError(f"A mesa {table_number:02d} já possui uma comanda aberta.")
+
+
 @_track_demo_mutations
 def create_order(session: Session, items: list[dict], customer_name: str = "", phone: str = "", notes: str = "",
                  responsible: str = "SISTEMA_HOMOLOGACAO",
-                 comanda_id: int | None = None) -> Order:
+                 comanda_id: int | None = None,
+                 table_number: int | None = None) -> Order:
     if not items:
         raise ValueError("Adicione ao menos um item ao pedido.")
+    normalized_table = normalize_table_number(table_number)
     comanda = _lock_comanda(session, comanda_id) if comanda_id is not None else None
     if comanda_id is not None and (comanda is None or comanda.status != "Aberta"):
         raise ValueError("A comanda selecionada não está aberta.")
     if comanda is not None and (customer_name.strip() or phone.strip()):
         raise ValueError("Pedidos vinculados herdam o cliente da comanda.")
+    if comanda is not None and normalized_table is not None and comanda.table_number != normalized_table:
+        raise ValueError("Pedidos vinculados herdam a mesa da comanda.")
+    if comanda is None:
+        _validate_open_table_conflict(session, normalized_table)
     cash = _lock_open_cash(session)
     if cash is None:
         raise ValueError("Caixa fechado. Abra um turno para registrar novos pedidos.")
@@ -187,7 +225,12 @@ def create_order(session: Session, items: list[dict], customer_name: str = "", p
         customer = Customer(name=customer_name.strip() or "Cliente", phone=phone.strip())
         session.add(customer)
         session.flush()
-    order = Order(customer_id=customer.id if customer else None, notes=notes.strip(), status="Recebido")
+    order = Order(
+        customer_id=customer.id if customer else None,
+        table_number=comanda.table_number if comanda is not None else normalized_table,
+        notes=notes.strip(),
+        status="Recebido",
+    )
     session.add(order)
     session.flush()
     for entry in items:
@@ -208,7 +251,7 @@ def create_order(session: Session, items: list[dict], customer_name: str = "", p
         order.delivered_at = now
         order.finished_at = now
         if comanda is None:
-            comanda = Comanda(customer_id=order.customer_id, total=order.total)
+            comanda = Comanda(customer_id=order.customer_id, table_number=order.table_number, total=order.total)
             session.add(comanda)
             session.flush()
             session.add(ComandaOrder(comanda_id=comanda.id, order_id=order.id))
@@ -247,7 +290,12 @@ def update_order_status(session: Session, order: Order, new_status: str,
             select(ComandaOrder).where(ComandaOrder.order_id == locked_order.id)
         )
         if comanda_order is None:
-            comanda = Comanda(customer_id=locked_order.customer_id, total=locked_order.total)
+            _validate_open_table_conflict(session, locked_order.table_number)
+            comanda = Comanda(
+                customer_id=locked_order.customer_id,
+                table_number=locked_order.table_number,
+                total=locked_order.total,
+            )
             session.add(comanda)
             session.flush()
             session.add(ComandaOrder(comanda_id=comanda.id, order_id=locked_order.id))
@@ -351,6 +399,36 @@ def close_comanda(
     total = locked_comanda.total
     session.commit()
     return total
+
+
+@_track_demo_mutations
+def assign_comanda_table(
+    session: Session,
+    comanda: Comanda,
+    table_number: int | None,
+    responsible: str = "SISTEMA_HOMOLOGACAO",
+) -> None:
+    locked_comanda = _lock_comanda(session, comanda.id)
+    if locked_comanda.status != "Aberta":
+        raise ValueError("Só é possível alterar mesa de comandas abertas.")
+    normalized_table = normalize_table_number(table_number)
+    _validate_open_table_conflict(session, normalized_table, ignore_comanda_id=locked_comanda.id)
+    locked_comanda.table_number = normalized_table
+    linked_order_ids = session.scalars(
+        select(ComandaOrder.order_id).where(ComandaOrder.comanda_id == locked_comanda.id)
+    ).all()
+    if linked_order_ids:
+        linked_orders = session.scalars(select(Order).where(Order.id.in_(linked_order_ids))).all()
+        for linked_order in linked_orders:
+            linked_order.table_number = normalized_table
+    table_label = f"Mesa {normalized_table:02d}" if normalized_table is not None else "Sem mesa"
+    audit(
+        session,
+        "Mesa da comanda alterada",
+        f"Comanda #{locked_comanda.id} · {table_label}",
+        responsible,
+    )
+    session.commit()
 
 
 @_track_demo_mutations

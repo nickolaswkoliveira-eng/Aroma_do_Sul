@@ -22,6 +22,18 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(app.text_input(key="orders.customer_name").value, "Ana")
         self.assertEqual(len(app.exception), 0)
 
+    def test_quick_service_mode_locks_target_table(self):
+        app_file = Path(__file__).resolve().parents[1] / "app.py"
+        app = AppTest.from_file(str(app_file))
+        app.query_params["pagina"] = "Pedidos"
+        app.query_params["acesso"] = "atendimento"
+        app.query_params["mesa"] = "02"
+        app.run()
+        captions = "\n".join(element.value for element in app.caption)
+        self.assertIn("Modo atendimento ativo · Mesa 02", captions)
+        self.assertEqual(app.session_state["active_page"], "Pedidos")
+        self.assertEqual(len(app.exception), 0)
+
     def test_last_report_survives_navigation(self):
         app_file = Path(__file__).resolve().parents[1] / "app.py"
         app = AppTest.from_file(str(app_file)).run()
@@ -54,6 +66,15 @@ class AppStateTests(unittest.TestCase):
         app = AppTest.from_file(str(app_file)).run()
         app.selectbox(key="mobile_nav_select").select("Pedidos").run()
         self.assertEqual(app.session_state["active_page"], "Pedidos")
+        self.assertEqual(len(app.exception), 0)
+
+    def test_home_action_opens_module_with_single_click(self):
+        app_file = Path(__file__).resolve().parents[1] / "app.py"
+        app = AppTest.from_file(str(app_file)).run()
+        app.button(key="home_action_Comandas").click().run()
+        self.assertEqual(app.session_state["active_page"], "Comandas")
+        titles = [element.value for element in app.title]
+        self.assertIn("Comandas", titles)
         self.assertEqual(len(app.exception), 0)
 
     def test_logout_reset_clears_session_values_on_next_run(self):

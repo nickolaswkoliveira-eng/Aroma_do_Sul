@@ -8,3 +8,4 @@ qrcode[pil]>=7.4
 alembic>=1.14
 psycopg[binary]>=3.2
 cryptography>=43
+fpdf2>=2.8

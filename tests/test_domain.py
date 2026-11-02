@@ -13,7 +13,7 @@ from models.entities import (
     Payable, Product, Receivable, RecipeItem, Role, Stock, StockMovement, User,
 )
 from services.domain import (
-    add_cash_movement, cancel_order, close_cash, close_comanda, cmv_for_period, create_order,
+    add_cash_movement, assign_comanda_table, cancel_order, close_cash, close_comanda, cmv_for_period, create_order,
     open_cash, purchase_recommendations, product_unit_costs, stock_level,
     update_order_status,
 )
@@ -21,6 +21,7 @@ from services.demo_data import DEMO_MARKER, populate_demo_data
 from services.demo_environment import clear_demo_records
 from services.seed import seed_demo_data
 from components.charts import apply_chart_theme, format_sales_series
+from pages.dashboard import _sales_total_for_day
 from utils.clock import local_now, local_today
 from utils.formatting import date_only, date_time, time_only
 
@@ -111,6 +112,7 @@ class DomainTests(unittest.TestCase):
             ),
             0,
         )
+        self.assertEqual(_sales_total_for_day(self.session, local_today()), received)
         clear_demo_records(self.session)
         self.session.commit()
         self.assertEqual(
@@ -128,6 +130,25 @@ class DomainTests(unittest.TestCase):
         self.session.commit()
         with self.assertRaises(ValueError):
             create_order(self.session, [{"product_id": product.id, "quantity": 1}])
+
+    def test_open_table_rejects_second_open_comanda(self):
+        product = self.session.scalar(select(Product).where(Product.name == "Cappuccino"))
+        order = create_order(self.session, [{"product_id": product.id, "quantity": 1}], table_number=1)
+        for status in ("Em preparo", "Pronto", "Entregue", "Finalizado"):
+            update_order_status(self.session, order, status)
+        self.assertEqual(order.table_number, 1)
+        with self.assertRaisesRegex(ValueError, "mesa 01 já possui"):
+            create_order(self.session, [{"product_id": product.id, "quantity": 1}], table_number=1)
+
+    def test_assign_table_updates_comanda_and_linked_orders(self):
+        product = self.session.scalar(select(Product).where(Product.name == "Cappuccino"))
+        order = create_order(self.session, [{"product_id": product.id, "quantity": 1}], table_number=2)
+        for status in ("Em preparo", "Pronto", "Entregue", "Finalizado"):
+            update_order_status(self.session, order, status)
+        comanda = self.session.scalar(select(Comanda).where(Comanda.status == "Aberta"))
+        assign_comanda_table(self.session, comanda, 4, "Operador")
+        self.assertEqual(self.session.get(Comanda, comanda.id).table_number, 4)
+        self.assertEqual(self.session.get(Order, order.id).table_number, 4)
 
     def test_cancelled_order_returns_preparation_stock_and_is_audited(self):
         product = self.session.scalar(select(Product).where(Product.name == "Cappuccino"))

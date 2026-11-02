@@ -169,6 +169,7 @@ def main() -> None:
             st.session_state.reports_hide_intelligence = True
         else:
             st.session_state.reports_hide_intelligence = False
+        quick_access_mode = st.query_params.get("acesso") == "atendimento"
         visible = {}
         for name, target in enabled_modules.items():
             permission = target[1]
@@ -180,10 +181,14 @@ def main() -> None:
                 visible[name] = target
             elif name == "Relatórios" and can_access(session, current_user, "reports"):
                 visible[name] = target
-            elif name == "Configurações" and current_user and role_name == "ADMINISTRADOR":
+            elif name == "Configurações" and current_user and can_access(session, current_user, "settings"):
                 visible[name] = target
             elif can_access(session, current_user, permission):
                 visible[name] = target
+
+        if quick_access_mode:
+            allowed = {"Pedidos", "Comandas", "Cozinha"}
+            visible = {name: target for name, target in visible.items() if name in allowed}
 
         if "Relatórios" in visible:
             visible["Visão geral"] = (dashboard.render, "reports", "◷", "Indicadores gerenciais do negócio.")

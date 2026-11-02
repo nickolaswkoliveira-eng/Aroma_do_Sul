@@ -5,13 +5,23 @@ import streamlit as st
 from components.layout import metric_card, section_heading
 from database.connection import get_session
 from models.entities import CashSession, Category, Comanda, Customer, Order, OrderItem, Product, Stock
-from services.domain import create_order
+from services.domain import TABLE_MAX, create_order
 from utils.clock import local_today
 from utils.formatting import currency, date_time
 from utils.session_state import (
     persist_value, persistent_number_input, persistent_selectbox, persistent_text_input,
     persistent_widget, persistent_toggle,
 )
+
+QUICK_MODE_STYLE = """
+<style>
+div[class*="st-key-quick_add_"] button {
+  min-height: 4rem !important;
+  font-size: 1.05rem !important;
+  font-weight: 700 !important;
+}
+</style>
+"""
 
 
 def _orders_items_map(session: Session, order_ids: list[int]) -> dict[int, list[OrderItem]]:
@@ -24,6 +34,17 @@ def _orders_items_map(session: Session, order_ids: list[int]) -> dict[int, list[
     for item in items:
         by_order.setdefault(item.order_id, []).append(item)
     return by_order
+
+
+def _query_table_number(raw_value: str | None) -> int | None:
+    if not raw_value:
+        return None
+    if not str(raw_value).isdigit():
+        return None
+    value = int(raw_value)
+    if value < 1 or value > TABLE_MAX:
+        return None
+    return value
 
 
 def _render_live_orders_panel_content(session: Session) -> None:
@@ -42,7 +63,11 @@ def _render_live_orders_panel_content(session: Session) -> None:
     with st.expander("Atualização em tempo real", expanded=False):
         st.caption("Pedidos do celular aparecem aqui automaticamente (atualização a cada 8 segundos).")
         for order in latest_orders:
-            st.write(f"**#{order.id} · {order.status}** · {date_time(order.created_at)} · {currency(order.total)}")
+            table_label = f"Mesa {order.table_number:02d}" if order.table_number is not None else "Sem mesa"
+            st.write(
+                f"**#{order.id} · {order.status} · {table_label}** · "
+                f"{date_time(order.created_at)} · {currency(order.total)}"
+            )
 
 
 @st.fragment(run_every="8s")
@@ -55,18 +80,30 @@ def _render_live_orders_panel_auto() -> None:
 
 
 def render(session: Session) -> None:
-    section_heading("Pedidos", "Monte o pedido e acompanhe o atendimento")
+    quick_mode = st.query_params.get("acesso") == "atendimento"
+    locked_table_number = _query_table_number(st.query_params.get("mesa"))
+    section_heading(
+        "Pedidos",
+        "Atendimento rápido por mesa" if quick_mode else "Monte o pedido e acompanhe o atendimento",
+    )
     if "cart" not in st.session_state:
         st.session_state.cart = {}
-    live_refresh = persistent_toggle(
-        "Atualizar pedidos em tempo real (8s)",
-        key="orders.live_refresh",
-        default=True,
-    )
-    if live_refresh:
-        _render_live_orders_panel_auto()
+    if quick_mode:
+        st.markdown(QUICK_MODE_STYLE, unsafe_allow_html=True)
+        if locked_table_number is not None:
+            st.caption(f"Modo atendimento ativo · Mesa {locked_table_number:02d}")
+        else:
+            st.warning("Mesa inválida no QR Code. Use um QR de mesa entre 01 e 05.")
     else:
-        _render_live_orders_panel_content(session)
+        live_refresh = persistent_toggle(
+            "Atualizar pedidos em tempo real (8s)",
+            key="orders.live_refresh",
+            default=True,
+        )
+        if live_refresh:
+            _render_live_orders_panel_auto()
+        else:
+            _render_live_orders_panel_content(session)
     products = session.scalars(select(Product).where(Product.active.is_(True), Product.sale_price > 0).order_by(Product.name)).all()
     categories = session.scalars(select(Category).where(Category.active.is_(True)).order_by(Category.name)).all()
     open_comandas = session.scalars(
@@ -78,6 +115,14 @@ def render(session: Session) -> None:
     comanda_ids = {comanda.id for comanda in open_comandas}
     if st.session_state.get("orders.comanda_target") not in comanda_ids:
         st.session_state.pop("orders.comanda_target", None)
+    locked_comanda = None
+    if quick_mode and locked_table_number is not None:
+        table_comandas = [comanda for comanda in open_comandas if comanda.table_number == locked_table_number]
+        if table_comandas:
+            locked_comanda = table_comandas[0]
+            st.session_state["orders.comanda_target"] = locked_comanda.id
+        else:
+            st.session_state.pop("orders.comanda_target", None)
     customer_ids = {comanda.customer_id for comanda in open_comandas if comanda.customer_id is not None}
     customers_by_id = {
         customer.id: customer.name
@@ -86,6 +131,7 @@ def render(session: Session) -> None:
     comanda_labels = {
         comanda.id: (
             f"Comanda #{comanda.id} · "
+            f"{f'Mesa {comanda.table_number:02d} · ' if comanda.table_number is not None else ''}"
             f"{customers_by_id.get(comanda.customer_id, 'Cliente sem cadastro')} · "
             f"{currency(comanda.total)}"
         )
@@ -105,14 +151,38 @@ def render(session: Session) -> None:
                                      .group_by(OrderItem.product_id)).all()
     last_sold = {row.product_id: row.last_sold for row in last_sold_rows}
     category_names = ["Todas"] + [category.name for category in categories]
-    category_column, mode_column, search_column = st.columns([1, 1, 2])
-    with category_column:
-        selected_category = persistent_selectbox("Categoria", category_names, key="orders.category", default="Todas")
-    with mode_column:
-        filter_mode = persistent_selectbox("Exibir", ["Todos", "Favoritos", "Mais vendidos", "Últimos vendidos"],
-                                           key="orders.product_filter", default="Todos")
-    with search_column:
-        search = persistent_text_input("Buscar produto", key="orders.search", placeholder="Nome ou código")
+    if quick_mode:
+        category_column, search_column = st.columns([1, 2])
+        with category_column:
+            selected_category = persistent_selectbox("Categoria", category_names, key="orders.category", default="Todas")
+        with search_column:
+            search = persistent_text_input("Buscar produto", key="orders.search", placeholder="Nome ou código")
+        st.caption("Atalhos de categoria")
+        quick_buttons_per_row = 5
+        for start in range(0, len(category_names), quick_buttons_per_row):
+            chunk = category_names[start:start + quick_buttons_per_row]
+            row = st.columns(len(chunk))
+            for index, name in enumerate(chunk):
+                with row[index]:
+                    if st.button(
+                        name,
+                        key=f"quick_category_{start + index}",
+                        width="stretch",
+                        type="primary" if selected_category == name else "secondary",
+                    ):
+                        st.session_state["orders.category"] = name
+                        persist_value("orders.category", name)
+                        st.rerun()
+        filter_mode = "Todos"
+    else:
+        category_column, mode_column, search_column = st.columns([1, 1, 2])
+        with category_column:
+            selected_category = persistent_selectbox("Categoria", category_names, key="orders.category", default="Todas")
+        with mode_column:
+            filter_mode = persistent_selectbox("Exibir", ["Todos", "Favoritos", "Mais vendidos", "Últimos vendidos"],
+                                               key="orders.product_filter", default="Todos")
+        with search_column:
+            search = persistent_text_input("Buscar produto", key="orders.search", placeholder="Nome ou código")
     visible = [product for product in products
                if (selected_category == "Todas" or category_by_id.get(product.category_id) == selected_category)
                and (filter_mode != "Favoritos" or product.id in favorites)
@@ -125,7 +195,7 @@ def render(session: Session) -> None:
         -(last_sold[product.id].timestamp() if product.id in last_sold else 0),
         product.name.casefold(),
     ))
-    page_size = 9
+    page_size = 12 if quick_mode else 9
     page_count = max(1, (len(visible) + page_size - 1) // page_size)
     catalog_page = min(int(st.session_state.get("orders.catalog_page", 1)), page_count)
     st.session_state["orders.catalog_page"] = catalog_page
@@ -134,31 +204,45 @@ def render(session: Session) -> None:
     catalog, summary = st.columns([2.15, 1], gap="large")
     with catalog:
         st.caption(f"{len(visible)} produtos disponíveis")
+        if quick_mode:
+            st.caption("Toque no produto para adicionar 1 unidade ao pedido.")
         if not visible:
             st.info("Nenhum produto corresponde aos filtros atuais.")
-        grid = st.columns(3)
+        grid = st.columns(4 if quick_mode else 3)
         for index, product in enumerate(visible):
-            with grid[index % 3]:
-                with st.container(key=f"product_card_{product.id}"):
-                    stock = stock_by_product.get(product.id)
-                    stock_label = f"{stock.quantity:g} {product.unit} em estoque" if stock else "Sem saldo cadastrado"
-                    st.markdown(f'<div class="product-card"><div class="panel-label">{category_by_id.get(product.category_id, "Produto")}</div><div class="module-title">{product.name}</div><div class="panel-value">{currency(product.sale_price)}</div><div class="panel-note">{product.code} · {stock_label}</div></div>', unsafe_allow_html=True)
-                    if st.button("★" if product.id in favorites else "☆", key=f"favorite_{product.id}",
-                                 help="Remover dos favoritos" if product.id in favorites else "Adicionar aos favoritos"):
-                        if product.id in favorites:
-                            favorites.remove(product.id)
-                        else:
-                            favorites.add(product.id)
-                        st.rerun()
-                    quantity = persistent_number_input("Quantidade", key=f"orders.quantity.{product.id}",
-                                                       default=1, min_value=1, max_value=50)
-                    note = persistent_text_input("Observação", key=f"orders.note.{product.id}",
-                                                 placeholder="Ex.: sem açúcar")
-                    if st.button("Adicionar", key=f"add_{product.id}", width="stretch", disabled=not cash_open):
-                        current = st.session_state.cart.get(product.id, {"quantity": 0, "notes": note})
-                        current["quantity"] += int(quantity)
-                        current["notes"] = note
+            with grid[index % (4 if quick_mode else 3)]:
+                if quick_mode:
+                    if st.button(
+                        f"{product.name}\n{currency(product.sale_price)}",
+                        key=f"quick_add_{product.id}",
+                        width="stretch",
+                        disabled=not cash_open,
+                    ):
+                        current = st.session_state.cart.get(product.id, {"quantity": 0, "notes": ""})
+                        current["quantity"] += 1
                         st.session_state.cart[product.id] = current
+                    st.caption(f"{product.code} · {category_by_id.get(product.category_id, 'Produto')}")
+                else:
+                    with st.container(key=f"product_card_{product.id}"):
+                        stock = stock_by_product.get(product.id)
+                        stock_label = f"{stock.quantity:g} {product.unit} em estoque" if stock else "Sem saldo cadastrado"
+                        st.markdown(f'<div class="product-card"><div class="panel-label">{category_by_id.get(product.category_id, "Produto")}</div><div class="module-title">{product.name}</div><div class="panel-value">{currency(product.sale_price)}</div><div class="panel-note">{product.code} · {stock_label}</div></div>', unsafe_allow_html=True)
+                        if st.button("★" if product.id in favorites else "☆", key=f"favorite_{product.id}",
+                                     help="Remover dos favoritos" if product.id in favorites else "Adicionar aos favoritos"):
+                            if product.id in favorites:
+                                favorites.remove(product.id)
+                            else:
+                                favorites.add(product.id)
+                            st.rerun()
+                        quantity = persistent_number_input("Quantidade", key=f"orders.quantity.{product.id}",
+                                                           default=1, min_value=1, max_value=50)
+                        note = persistent_text_input("Observação", key=f"orders.note.{product.id}",
+                                                     placeholder="Ex.: sem açúcar")
+                        if st.button("Adicionar", key=f"add_{product.id}", width="stretch", disabled=not cash_open):
+                            current = st.session_state.cart.get(product.id, {"quantity": 0, "notes": note})
+                            current["quantity"] += int(quantity)
+                            current["notes"] = note
+                            st.session_state.cart[product.id] = current
         if page_count > 1:
             previous, page_label, next_button = st.columns([1, 2, 1])
             if previous.button("←", help="Produtos anteriores", disabled=catalog_page <= 1, key="orders.catalog.previous"):
@@ -182,41 +266,94 @@ def render(session: Session) -> None:
                 product = products_by_id.get(product_id)
                 if not product:
                     continue
-                line, remove = st.columns([5, 1])
-                line.markdown(f"**{item['quantity']}× {product.name}**  \n{currency(product.sale_price * item['quantity'])}")
-                if remove.button("×", key=f"remove_order_item_{product_id}", help="Remover item"):
-                    st.session_state.cart.pop(product_id, None)
-                    st.rerun()
+                if quick_mode:
+                    line, decrease, increase, remove = st.columns([4, 1, 1, 1])
+                    line.markdown(f"**{item['quantity']}× {product.name}**  \n{currency(product.sale_price * item['quantity'])}")
+                    if decrease.button("−", key=f"decrease_order_item_{product_id}", help="Diminuir quantidade"):
+                        item["quantity"] -= 1
+                        if item["quantity"] <= 0:
+                            st.session_state.cart.pop(product_id, None)
+                        else:
+                            st.session_state.cart[product_id] = item
+                        st.rerun()
+                    if increase.button("+", key=f"increase_order_item_{product_id}", help="Aumentar quantidade"):
+                        item["quantity"] += 1
+                        st.session_state.cart[product_id] = item
+                        st.rerun()
+                    if remove.button("×", key=f"remove_order_item_{product_id}", help="Remover item"):
+                        st.session_state.cart.pop(product_id, None)
+                        st.rerun()
+                else:
+                    line, remove = st.columns([5, 1])
+                    line.markdown(f"**{item['quantity']}× {product.name}**  \n{currency(product.sale_price * item['quantity'])}")
+                    if remove.button("×", key=f"remove_order_item_{product_id}", help="Remover item"):
+                        st.session_state.cart.pop(product_id, None)
+                        st.rerun()
                 if item.get("notes"):
                     st.caption(item["notes"])
             st.divider()
             st.write(f"Subtotal · {currency(subtotal)}")
             st.write(f"Descontos · {currency(discount)}")
             st.markdown(f"### Total · {currency(total)}")
-            comanda_options = [None, *(comanda.id for comanda in open_comandas)]
-            selected_comanda_id = st.selectbox(
-                "Vincular a uma comanda aberta",
-                comanda_options,
-                format_func=lambda value: "Nova comanda" if value is None else comanda_labels[value],
-                key="orders.comanda_target",
-            )
+            table_options = [None, *range(1, TABLE_MAX + 1)]
+            if quick_mode and locked_table_number is not None:
+                selected_comanda_id = locked_comanda.id if locked_comanda is not None else None
+                selected_table_number = locked_table_number
+                if selected_comanda_id is not None:
+                    st.caption(
+                        f"Pedido vinculado à Comanda #{selected_comanda_id} · Mesa {locked_table_number:02d}"
+                    )
+                else:
+                    st.caption(f"Novo pedido para Mesa {locked_table_number:02d}")
+            else:
+                comanda_options = [None, *(comanda.id for comanda in open_comandas)]
+                selected_comanda_id = st.selectbox(
+                    "Vincular a uma comanda aberta",
+                    comanda_options,
+                    format_func=lambda value: "Nova comanda" if value is None else comanda_labels[value],
+                    key="orders.comanda_target",
+                )
             if selected_comanda_id is not None:
                 customer = session.get(
                     Customer,
                     next(comanda.customer_id for comanda in open_comandas
                          if comanda.id == selected_comanda_id),
                 )
+                selected_comanda = next(
+                    comanda for comanda in open_comandas if comanda.id == selected_comanda_id
+                )
+                table_label = (
+                    f"Mesa {selected_comanda.table_number:02d}"
+                    if selected_comanda.table_number is not None
+                    else "Sem mesa"
+                )
                 st.caption(
                     f"Este pedido será somado à Comanda #{selected_comanda_id}"
                     + (f" · {customer.name}" if customer else "")
+                    + f" · {table_label}"
                     + " e enviado à cozinha como um novo lote."
                 )
                 customer_name = ""
                 phone = ""
+                selected_table_number = selected_comanda.table_number
             else:
-                customer_name = st.text_input("Cliente (opcional)", **persistent_widget("orders.customer_name", ""))
-                phone = st.text_input("Telefone (opcional)", **persistent_widget("orders.customer_phone", ""))
-            notes = st.text_input("Observações do pedido", **persistent_widget("orders.notes", ""))
+                if quick_mode and locked_table_number is not None:
+                    selected_table_number = locked_table_number
+                else:
+                    selected_table_number = st.selectbox(
+                        "Mesa",
+                        table_options,
+                        format_func=lambda value: "Sem mesa / balcão" if value is None else f"Mesa {value:02d}",
+                        key="orders.table_number",
+                    )
+                if quick_mode:
+                    customer_name = ""
+                    phone = ""
+                else:
+                    customer_name = st.text_input("Cliente (opcional)", **persistent_widget("orders.customer_name", ""))
+                    phone = st.text_input("Telefone (opcional)", **persistent_widget("orders.customer_phone", ""))
+            notes_label = "Observações rápidas" if quick_mode else "Observações do pedido"
+            notes = st.text_input(notes_label, **persistent_widget("orders.notes", ""))
             if st.button(
                 "Finalizar Pedido",
                 type="primary",
@@ -228,16 +365,20 @@ def render(session: Session) -> None:
                                            customer_name if selected_comanda_id is None else "",
                                            phone, notes,
                                            st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
-                                           comanda_id=selected_comanda_id)
+                                           comanda_id=selected_comanda_id,
+                                           table_number=selected_table_number)
                     st.session_state.cart = {}
+                    table_suffix = f" · Mesa {created.table_number:02d}" if created.table_number is not None else ""
                     if created.status == "Finalizado":
                         st.success(
                             f"Pedido #{created.id} registrado com entrega imediata."
+                            + table_suffix
                             + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
                         )
                     else:
                         st.success(
                             f"Pedido #{created.id} enviado para preparo."
+                            + table_suffix
                             + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
                         )
                     st.rerun()
@@ -245,7 +386,15 @@ def render(session: Session) -> None:
                     session.rollback()
                     st.error(str(error))
     st.divider()
+    if quick_mode:
+        with st.expander("Pedidos recentes", expanded=False):
+            _render_recent_orders(session)
+        return
     st.subheader("Pedidos recentes")
+    _render_recent_orders(session)
+
+
+def _render_recent_orders(session: Session) -> None:
     page_size = 12
     total_orders = session.scalar(select(func.count(Order.id))) or 0
     page_count = max(1, (total_orders + page_size - 1) // page_size)
@@ -264,7 +413,11 @@ def render(session: Session) -> None:
     for order in orders:
         items = order_items_by_order.get(order.id, [])
         product_names = [products_by_recent.get(item.product_id, "Produto") for item in items]
-        st.write(f"**#{order.id} · {order.status}** · {date_time(order.created_at)} · {', '.join(product_names)} · {currency(order.total)}")
+        table_label = f"Mesa {order.table_number:02d}" if order.table_number is not None else "Sem mesa"
+        st.write(
+            f"**#{order.id} · {order.status} · {table_label}** · "
+            f"{date_time(order.created_at)} · {', '.join(product_names)} · {currency(order.total)}"
+        )
     if page_count > 1:
         previous, page_label, next_button = st.columns([1, 2, 1])
         if previous.button("← Anterior", disabled=current_page <= 1, key="orders.previous"):

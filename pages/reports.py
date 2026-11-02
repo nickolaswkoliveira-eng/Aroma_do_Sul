@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from io import BytesIO
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import pandas as pd
@@ -8,7 +9,10 @@ import streamlit as st
 
 from components.layout import metric_card, module_card, section_heading
 from components.charts import apply_chart_theme, format_sales_series
-from models.entities import CashMovement, CashSession, Order, OrderItem, Payable, Product, Receivable, Stock, StockMovement
+from models.entities import (
+    CashMovement, CashSession, Comanda, ComandaOrder, Order, OrderItem, Payable,
+    Product, Receivable, Stock, StockMovement,
+)
 from services.domain import cmv_for_period, product_unit_costs
 from utils.clock import local_today
 from utils.formatting import currency, date_only, date_time
@@ -31,6 +35,141 @@ def _sales(session: Session, start: date, end: date):
     return session.scalars(select(Order).where(func.date(Order.created_at) >= start,
                                                func.date(Order.created_at) <= end,
                                                Order.status != "Cancelado").order_by(Order.created_at)).all()
+
+
+def _daily_closed_comandas(session: Session, target_day: date) -> list[Comanda]:
+    return session.scalars(
+        select(Comanda)
+        .where(
+            Comanda.status == "Fechada",
+            func.date(Comanda.closed_at) == target_day,
+        )
+        .order_by(Comanda.closed_at)
+    ).all()
+
+
+def _daily_sales_dataframe(session: Session, target_day: date) -> tuple[pd.DataFrame, dict]:
+    comandas = _daily_closed_comandas(session, target_day)
+    if not comandas:
+        return pd.DataFrame(), {"total": 0.0, "count": 0, "ticket": 0.0, "by_method": {}}
+    comanda_ids = [item.id for item in comandas]
+    movement_rows = session.scalars(
+        select(CashMovement)
+        .where(
+            CashMovement.movement_type == "Entrada",
+            func.date(CashMovement.created_at) == target_day,
+        )
+        .order_by(CashMovement.created_at)
+    ).all()
+    movement_by_comanda = {}
+    for movement in movement_rows:
+        if not movement.description.startswith("Comanda #"):
+            continue
+        code = movement.description.split("#", 1)[1].strip()
+        if code.isdigit():
+            movement_by_comanda[int(code)] = movement
+    order_count_rows = session.execute(
+        select(ComandaOrder.comanda_id, func.count(ComandaOrder.id))
+        .where(ComandaOrder.comanda_id.in_(comanda_ids))
+        .group_by(ComandaOrder.comanda_id)
+    ).all()
+    order_count_by_comanda = {comanda_id: count for comanda_id, count in order_count_rows}
+    rows = []
+    total = 0.0
+    by_method: dict[str, float] = {}
+    for comanda in comandas:
+        movement = movement_by_comanda.get(comanda.id)
+        amount = movement.amount if movement is not None else comanda.total
+        method = movement.method if movement is not None else "Não informado"
+        total += amount
+        by_method[method] = by_method.get(method, 0.0) + amount
+        rows.append({
+            "Hora": comanda.closed_at.strftime("%H:%M") if comanda.closed_at else "-",
+            "Comanda": comanda.id,
+            "Mesa": f"{comanda.table_number:02d}" if comanda.table_number is not None else "-",
+            "Pedidos": int(order_count_by_comanda.get(comanda.id, 0)),
+            "Forma de pagamento": method,
+            "Valor": float(amount),
+        })
+    frame = pd.DataFrame(rows)
+    summary = {
+        "total": float(total),
+        "count": len(rows),
+        "ticket": float(total / len(rows)) if rows else 0.0,
+        "by_method": by_method,
+    }
+    return frame, summary
+
+
+def _daily_sales_excel(frame: pd.DataFrame, summary: dict, target_day: date) -> bytes:
+    output = BytesIO()
+    methods = summary.get("by_method", {})
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        header = pd.DataFrame([{
+            "Data": target_day.strftime("%d/%m/%Y"),
+            "Total vendido": summary["total"],
+            "Comandas fechadas": summary["count"],
+            "Ticket médio": summary["ticket"],
+        }])
+        header.to_excel(writer, index=False, sheet_name="Resumo")
+        if methods:
+            method_rows = pd.DataFrame([
+                {"Forma de pagamento": method, "Valor": value}
+                for method, value in sorted(methods.items())
+            ])
+            method_rows.to_excel(writer, index=False, sheet_name="Pagamento")
+        frame.to_excel(writer, index=False, sheet_name="Vendas")
+    output.seek(0)
+    return output.getvalue()
+
+
+def _daily_sales_pdf(frame: pd.DataFrame, summary: dict, target_day: date) -> bytes:
+    try:
+        from fpdf import FPDF
+        from fpdf.enums import XPos, YPos
+    except ImportError as error:
+        raise RuntimeError("Biblioteca de PDF indisponível. Instale fpdf2 para exportar.") from error
+
+    pdf = FPDF(unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Relatório diário de vendas", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(0, 8, f"Data: {target_day:%d/%m/%Y}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 8, f"Total vendido: {currency(summary['total'])}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(
+        0,
+        8,
+        f"Comandas fechadas: {summary['count']}  |  Ticket médio: {currency(summary['ticket'])}",
+        new_x=XPos.LMARGIN,
+        new_y=YPos.NEXT,
+    )
+    pdf.ln(2)
+    methods = summary.get("by_method", {})
+    if methods:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Recebimentos por forma de pagamento", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font("Helvetica", "", 11)
+        for method, value in sorted(methods.items()):
+            pdf.cell(0, 7, f"{method}: {currency(value)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(25, 8, "Hora", border=1)
+    pdf.cell(25, 8, "Comanda", border=1)
+    pdf.cell(20, 8, "Mesa", border=1)
+    pdf.cell(20, 8, "Pedidos", border=1)
+    pdf.cell(55, 8, "Forma", border=1)
+    pdf.cell(40, 8, "Valor", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("Helvetica", "", 10)
+    for row in frame.itertuples(index=False):
+        pdf.cell(25, 7, str(row[0]), border=1)
+        pdf.cell(25, 7, str(row[1]), border=1)
+        pdf.cell(20, 7, str(row[2]), border=1)
+        pdf.cell(20, 7, str(row[3]), border=1)
+        pdf.cell(55, 7, str(row[4])[:27], border=1)
+        pdf.cell(40, 7, currency(float(row[5])), border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    return bytes(pdf.output())
 
 
 def render(session: Session) -> None:
@@ -112,6 +251,77 @@ def _sales_report(session: Session, basic: bool = False) -> None:
         st.plotly_chart(chart, width="stretch")
     else:
         st.info("Sem vendas no período selecionado.")
+
+    st.subheader("Consulta diária de vendas")
+    target_day = persistent_date_input(
+        "Selecione a data",
+        key="reports.daily_sales_date",
+        default=local_today(),
+        format="DD/MM/YYYY",
+    )
+    daily_frame, summary = _daily_sales_dataframe(session, target_day)
+    daily_metrics = st.columns(3)
+    with daily_metrics[0]:
+        metric_card("Total vendido no dia", currency(summary["total"]), f"{target_day:%d/%m/%Y}")
+    with daily_metrics[1]:
+        metric_card("Comandas fechadas", str(summary["count"]), "Recebimentos no caixa")
+    with daily_metrics[2]:
+        metric_card("Ticket médio", currency(summary["ticket"]), "Total dividido por comandas")
+    if daily_frame.empty:
+        st.info("Sem vendas registradas para a data selecionada.")
+    else:
+        by_method = summary.get("by_method", {})
+        method_frame = pd.DataFrame(
+            [{"Forma": method, "Valor": value} for method, value in sorted(by_method.items())]
+        )
+        method_chart = px.bar(
+            method_frame,
+            x="Forma",
+            y="Valor",
+            text=method_frame["Valor"].apply(currency),
+            color="Forma",
+            color_discrete_sequence=CHART_SCALE,
+        )
+        method_chart.update_layout(height=320, showlegend=False)
+        method_chart.update_traces(textposition="outside")
+        apply_chart_theme(method_chart)
+        st.plotly_chart(method_chart, width="stretch", config={"displayModeBar": False})
+        st.dataframe(
+            [
+                {
+                    "Hora": row["Hora"],
+                    "Comanda": row["Comanda"],
+                    "Mesa": row["Mesa"],
+                    "Pedidos": row["Pedidos"],
+                    "Forma de pagamento": row["Forma de pagamento"],
+                    "Valor": currency(float(row["Valor"])),
+                }
+                for _, row in daily_frame.iterrows()
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+        export_columns = st.columns(2)
+        with export_columns[0]:
+            st.download_button(
+                "Exportar Excel do dia",
+                data=_daily_sales_excel(daily_frame, summary, target_day),
+                file_name=f"vendas_{target_day:%Y-%m-%d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="reports.daily_sales_export_excel",
+            )
+        with export_columns[1]:
+            try:
+                pdf_data = _daily_sales_pdf(daily_frame, summary, target_day)
+                st.download_button(
+                    "Exportar PDF do dia",
+                    data=pdf_data,
+                    file_name=f"vendas_{target_day:%Y-%m-%d}.pdf",
+                    mime="application/pdf",
+                    key="reports.daily_sales_export_pdf",
+                )
+            except RuntimeError as error:
+                st.warning(str(error))
     production = [(order.ready_at - order.started_at).total_seconds() / 60 for order in orders
                   if order.started_at and order.ready_at]
     delivery = [(order.delivered_at - order.ready_at).total_seconds() / 60 for order in orders

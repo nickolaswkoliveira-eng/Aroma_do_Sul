@@ -90,7 +90,8 @@ def _render_queue_content(session, responsible: str, show_auto_refresh_caption: 
                 st.caption("Nenhum pedido")
             for order in board_orders:
                 with st.container(key=f"kitchen_order_{order.id}"):
-                    st.markdown(f"**Pedido #{order.id}** · {order.status}")
+                    table_label = f"Mesa {order.table_number:02d}" if order.table_number is not None else "Sem mesa"
+                    st.markdown(f"**Pedido #{order.id} · {table_label}** · {order.status}")
                     st.caption(f"Recebido às {order.created_at:%H:%M} · há {int((now - order.created_at).total_seconds() // 60)} min")
                     for item in items_by_order.get(order.id, []):
                         product = products_by_id.get(item.product_id)

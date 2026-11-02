@@ -25,6 +25,9 @@ from utils.session_state import persist_value
 
 
 def _render_homologation(session) -> None:
+    if st.session_state.get("current_role") != "ADMINISTRADOR":
+        st.warning("Somente administradores podem alterar dados de demonstração.")
+        return
     st.subheader("Homologação")
     st.warning(
         "Estas ações atuam exclusivamente no arquivo SQLite isolado de demonstração. "
@@ -172,6 +175,9 @@ def _render_homologation(session) -> None:
 
 def render(session) -> None:
     section_heading("Configurações", "Parâmetros gerais do ambiente")
+    if st.session_state.get("current_role") not in {"ADMINISTRADOR", "GERENTE"}:
+        st.error("Acesso restrito a administradores e gerentes.")
+        return
     first, second = st.columns(2)
     with first:
         with st.container(border=True):

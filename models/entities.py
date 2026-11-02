@@ -108,6 +108,7 @@ class Order(Base):
     __tablename__ = "pedidos"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("clientes.id"), nullable=True)
+    table_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default="Recebido", index=True)
     notes: Mapped[str] = mapped_column(Text, default="")
     total: Mapped[float] = mapped_column(Money, default=0)
@@ -122,6 +123,7 @@ class Comanda(Base):
     __tablename__ = "comandas"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("clientes.id"), nullable=True)
+    table_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="Aberta", index=True)
     total: Mapped[float] = mapped_column(Money, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)

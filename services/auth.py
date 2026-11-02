@@ -13,9 +13,22 @@ from utils.clock import local_now
 
 ROLE_PERMISSIONS = {
     "ADMINISTRADOR": ["*"],
-    "GERENTE": ["reports", "finance", "inventory", "intelligence"],
-    "CAIXA": ["orders", "cash", "basic_reports"],
-    "ATENDENTE": ["orders", "orders:create", "orders:update"],
+    "GERENTE": [
+        "orders",
+        "orders:create",
+        "orders:update",
+        "orders:status",
+        "kitchen:view",
+        "inventory",
+        "cash",
+        "reports",
+        "basic_reports",
+        "finance",
+        "intelligence",
+        "settings",
+    ],
+    "CAIXA": ["orders", "orders:create", "orders:update", "cash", "reports", "basic_reports"],
+    "ATENDENTE": ["orders", "orders:create", "orders:update", "kitchen:view"],
     "COZINHA": ["kitchen:view", "orders:status"],
 }
 MAX_ACTIVE_SESSIONS_PER_USER = 4

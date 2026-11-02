@@ -78,6 +78,8 @@ Confira contagens e totais de vendas no banco de teste. Repita o teste ao menos 
 
 `MODO_HOMOLOGACAO = False` ativa o login por padrão fora dos testes; com isso, permissões por perfil são aplicadas e operações ficam auditadas com o usuário autenticado. Para desativar login em cenários controlados, use `MODO_HOMOLOGACAO=true`. Na primeira abertura será solicitado o cadastro do administrador. Perfis e permissões são inicializados no banco. O módulo de usuários pode ser controlado por `MODULO_USUARIOS` (padrão `true`), mas apenas o perfil `ADMINISTRADOR` consegue acessá-lo e alterar contas.
 
+Perfis padrão: `GERENTE` possui acesso operacional amplo (pedidos, comandas, cozinha, estoque, caixa, relatórios, financeiro, inteligência e configurações), enquanto `CAIXA`, `ATENDENTE` e `COZINHA` permanecem sem acesso a Financeiro e Configurações. A área de Homologação dentro de Configurações também fica restrita ao `ADMINISTRADOR`.
+
 No modo com login ativo, a sessão autenticada usa token opaco persistido em cookie com renovação deslizante por `AUTH_SESSION_TTL_DAYS`. Por padrão, `AUTH_COOKIE_SECURE` segue o ambiente (`false` em desenvolvimento e `true` em produção), e o nome padrão do cookie muda entre `cafe_session` (sem prefixo) e `__Host-cafe_session` (prefixo seguro), evitando perda de sessão em `http://localhost`. `SameSite` continua configurável por `AUTH_COOKIE_SAMESITE`. O logout revoga a sessão no banco e remove o cookie.
 
 `MODO_DEMONSTRACAO=true` seleciona um arquivo SQLite separado (`cafeteria_demo.db`, configurável por `DEMO_DATABASE_URL`) e exibe um selo global. A configuração recusa banco em memória e impede que o caminho coincida com `DATABASE_URL`. Em Configurações, **Popular Dados de Demonstração** substitui somente os dados desse arquivo, gerando catálogo, estoque, pedidos, caixa e financeiro dos últimos 90 dias. O modo fica desativado por padrão; o app não semeia mais registros demonstrativos automaticamente no banco principal. `MODO_HOMOLOGACAO` controla login/permissões e é independente do modo de dados.
@@ -100,6 +102,12 @@ Os módulos de Usuários, Financeiro, DRE e Inteligência são controlados por f
 A tela inicial prioriza tarefas operacionais e mostra apenas os estados permitidos pelo perfil ativo; o menu superior não repete os atalhos de operação já disponíveis no início. Indicadores financeiros e a visão geral ficam na área de Gestão, acessível conforme as permissões. A projeção de fluxo de caixa fica no módulo Financeiro; Relatórios mantém consultas históricas e análises por período.
 
 Quando um pedido é finalizado na cozinha, o sistema abre uma comanda vinculada ao cliente. A área **Comandas** reúne as contas abertas; é possível adicionar pedidos à comanda (cada novo lote volta à fila da cozinha) e fechar/cobrar quando todos os pedidos estiverem finalizados e houver caixa aberto. O recebimento é registrado como entrada no caixa com a forma de pagamento escolhida. Em telas menores, o seletor de navegação continua oferecendo os módulos autorizados.
+
+Comandas e pedidos aceitam vínculo de mesa (`01` a `05`). Uma mesa não pode ter duas comandas abertas ao mesmo tempo; ao criar pedido para comanda existente, a mesa é herdada automaticamente. O módulo Comandas permite ajustar a mesa de uma comanda aberta e sincroniza os pedidos vinculados.
+
+O modo de atendimento rápido por QR usa `/?pagina=Pedidos&acesso=atendimento&mesa=NN` (mesa `01` a `05`). Nesse modo, a tela prioriza velocidade: foco em pedidos/comandas/status, adição de itens por um toque, atalhos de categoria e vínculo automático da mesa. Em Comandas, a finalização em lote por mesa permite fechar várias comandas prontas em uma única operação.
+
+O relatório de vendas inclui consulta por data com exportação em Excel e PDF, consolidando apenas comandas fechadas e entradas de caixa do dia para manter consistência com o fechamento.
 
 Novos pedidos exigem **caixa aberto** (inclusive ao adicionar pedido em comanda). Com o caixa fechado, a interface bloqueia a operação e orienta abrir um turno primeiro, preservando a integridade financeira.
 
