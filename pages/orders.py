@@ -385,11 +385,9 @@ def render(session: Session) -> None:
                 except ValueError as error:
                     session.rollback()
                     st.error(str(error))
-    st.divider()
     if quick_mode:
-        with st.expander("Pedidos recentes", expanded=False):
-            _render_recent_orders(session)
         return
+    st.divider()
     st.subheader("Pedidos recentes")
     _render_recent_orders(session)
 
