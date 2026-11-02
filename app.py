@@ -102,11 +102,18 @@ def _logout() -> None:
     st.query_params.clear()
 
 
+@st.cache_resource(ttl=60, show_spinner=False)
+def _init_database_throttled() -> bool:
+    # Evita refazer schema e verificação de backup a cada interação; o backup segue a cada 15 min.
+    init_database()
+    return True
+
+
 def main() -> None:
     configure_page()
     initialize_app_state()
     try:
-        init_database()
+        _init_database_throttled()
         session = get_session()
         if not st.session_state.get("_acl_seeded"):
             seed_access_control(session)
@@ -145,8 +152,10 @@ def main() -> None:
                 if current_user is None or not current_user.active:
                     return
             else:
-                if st.session_state.get("auth_session_token"):
-                    write_session_cookie(str(st.session_state["auth_session_token"]))
+                token = str(st.session_state.get("auth_session_token", "") or "")
+                if token and st.session_state.get("_cookie_written_token") != token:
+                    write_session_cookie(token)
+                    st.session_state["_cookie_written_token"] = token
         if MODO_HOMOLOGACAO:
             st.session_state.current_role = "ADMINISTRADOR"
             st.session_state.acting_user = "SISTEMA_HOMOLOGACAO"

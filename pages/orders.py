@@ -24,18 +24,6 @@ div[class*="st-key-quick_add_"] button {
 """
 
 
-def _orders_items_map(session: Session, order_ids: list[int]) -> dict[int, list[OrderItem]]:
-    if not order_ids:
-        return {}
-    items = session.scalars(
-        select(OrderItem).where(OrderItem.order_id.in_(order_ids))
-    ).all()
-    by_order: dict[int, list[OrderItem]] = {}
-    for item in items:
-        by_order.setdefault(item.order_id, []).append(item)
-    return by_order
-
-
 def _query_table_number(raw_value: str | None) -> int | None:
     if not raw_value:
         return None
@@ -104,6 +92,22 @@ def render(session: Session) -> None:
             _render_live_orders_panel_auto()
         else:
             _render_live_orders_panel_content(session)
+    _render_order_builder(quick_mode, locked_table_number)
+
+
+@st.fragment
+def _render_order_builder(quick_mode: bool, locked_table_number: int | None) -> None:
+    session = get_session()
+    try:
+        _render_order_builder_content(session, quick_mode, locked_table_number)
+    finally:
+        session.close()
+
+
+def _render_order_builder_content(session: Session, quick_mode: bool, locked_table_number: int | None) -> None:
+    flash = st.session_state.pop("orders.flash", None)
+    if flash:
+        st.success(flash)
     products = session.scalars(select(Product).where(Product.active.is_(True), Product.sale_price > 0).order_by(Product.name)).all()
     categories = session.scalars(select(Category).where(Category.active.is_(True)).order_by(Category.name)).all()
     open_comandas = session.scalars(
@@ -172,7 +176,8 @@ def render(session: Session) -> None:
                     ):
                         st.session_state["orders.category"] = name
                         persist_value("orders.category", name)
-                        st.rerun()
+                        st.session_state["orders.catalog_page"] = 1
+                        st.rerun(scope="fragment")
         filter_mode = "Todos"
     else:
         category_column, mode_column, search_column = st.columns([1, 1, 2])
@@ -233,7 +238,7 @@ def render(session: Session) -> None:
                                 favorites.remove(product.id)
                             else:
                                 favorites.add(product.id)
-                            st.rerun()
+                            st.rerun(scope="fragment")
                         quantity = persistent_number_input("Quantidade", key=f"orders.quantity.{product.id}",
                                                            default=1, min_value=1, max_value=50)
                         note = persistent_text_input("Observação", key=f"orders.note.{product.id}",
@@ -247,11 +252,11 @@ def render(session: Session) -> None:
             previous, page_label, next_button = st.columns([1, 2, 1])
             if previous.button("←", help="Produtos anteriores", disabled=catalog_page <= 1, key="orders.catalog.previous"):
                 st.session_state["orders.catalog_page"] = catalog_page - 1
-                st.rerun()
+                st.rerun(scope="fragment")
             page_label.caption(f"Produtos {page_start + 1}–{min(page_start + page_size, len(visible) + page_start)} · página {catalog_page}/{page_count}")
             if next_button.button("→", help="Mais produtos", disabled=catalog_page >= page_count, key="orders.catalog.next"):
                 st.session_state["orders.catalog_page"] = catalog_page + 1
-                st.rerun()
+                st.rerun(scope="fragment")
     subtotal = sum(products_by_id[product_id].sale_price * item["quantity"]
                    for product_id, item in st.session_state.cart.items() if product_id in products_by_id)
     discount = 0.0
@@ -275,20 +280,20 @@ def render(session: Session) -> None:
                             st.session_state.cart.pop(product_id, None)
                         else:
                             st.session_state.cart[product_id] = item
-                        st.rerun()
+                        st.rerun(scope="fragment")
                     if increase.button("+", key=f"increase_order_item_{product_id}", help="Aumentar quantidade"):
                         item["quantity"] += 1
                         st.session_state.cart[product_id] = item
-                        st.rerun()
+                        st.rerun(scope="fragment")
                     if remove.button("×", key=f"remove_order_item_{product_id}", help="Remover item"):
                         st.session_state.cart.pop(product_id, None)
-                        st.rerun()
+                        st.rerun(scope="fragment")
                 else:
                     line, remove = st.columns([5, 1])
                     line.markdown(f"**{item['quantity']}× {product.name}**  \n{currency(product.sale_price * item['quantity'])}")
                     if remove.button("×", key=f"remove_order_item_{product_id}", help="Remover item"):
                         st.session_state.cart.pop(product_id, None)
-                        st.rerun()
+                        st.rerun(scope="fragment")
                 if item.get("notes"):
                     st.caption(item["notes"])
             st.divider()
@@ -347,7 +352,7 @@ def render(session: Session) -> None:
                         key="orders.table_number",
                     )
                 if quick_mode:
-                    customer_name = ""
+                    customer_name = st.text_input("Nome do cliente (opcional)", **persistent_widget("orders.customer_name", ""))
                     phone = ""
                 else:
                     customer_name = st.text_input("Cliente (opcional)", **persistent_widget("orders.customer_name", ""))
@@ -369,61 +374,16 @@ def render(session: Session) -> None:
                                            table_number=selected_table_number)
                     st.session_state.cart = {}
                     table_suffix = f" · Mesa {created.table_number:02d}" if created.table_number is not None else ""
-                    if created.status == "Finalizado":
-                        st.success(
-                            f"Pedido #{created.id} registrado com entrega imediata."
-                            + table_suffix
-                            + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
-                        )
-                    else:
-                        st.success(
-                            f"Pedido #{created.id} enviado para preparo."
-                            + table_suffix
-                            + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
-                        )
+                    outcome = (
+                        "registrado com entrega imediata." if created.status == "Finalizado"
+                        else "enviado para preparo."
+                    )
+                    st.session_state["orders.flash"] = (
+                        f"Pedido #{created.id} {outcome}"
+                        + table_suffix
+                        + (f" · Comanda #{selected_comanda_id}" if selected_comanda_id else "")
+                    )
                     st.rerun()
                 except ValueError as error:
                     session.rollback()
                     st.error(str(error))
-    if quick_mode:
-        return
-    st.divider()
-    st.subheader("Pedidos recentes")
-    _render_recent_orders(session)
-
-
-def _render_recent_orders(session: Session) -> None:
-    page_size = 12
-    total_orders = session.scalar(select(func.count(Order.id))) or 0
-    page_count = max(1, (total_orders + page_size - 1) // page_size)
-    current_page = min(int(st.session_state.get("orders.page", 1)), page_count)
-    if current_page != st.session_state.get("orders.page", 1):
-        st.session_state["orders.page"] = current_page
-        persist_value("orders.page", current_page)
-    orders = session.scalars(select(Order).order_by(Order.created_at.desc())
-                             .offset((current_page - 1) * page_size).limit(page_size)).all()
-    order_items_by_order = _orders_items_map(session, [order.id for order in orders])
-    product_ids = {item.product_id for items in order_items_by_order.values() for item in items}
-    products_by_recent = {
-        product.id: product.name
-        for product in session.scalars(select(Product).where(Product.id.in_(product_ids))).all()
-    } if product_ids else {}
-    for order in orders:
-        items = order_items_by_order.get(order.id, [])
-        product_names = [products_by_recent.get(item.product_id, "Produto") for item in items]
-        table_label = f"Mesa {order.table_number:02d}" if order.table_number is not None else "Sem mesa"
-        st.write(
-            f"**#{order.id} · {order.status} · {table_label}** · "
-            f"{date_time(order.created_at)} · {', '.join(product_names)} · {currency(order.total)}"
-        )
-    if page_count > 1:
-        previous, page_label, next_button = st.columns([1, 2, 1])
-        if previous.button("← Anterior", disabled=current_page <= 1, key="orders.previous"):
-            st.session_state["orders.page"] = current_page - 1
-            persist_value("orders.page", current_page - 1)
-            st.rerun()
-        page_label.caption(f"Página {current_page} de {page_count}")
-        if next_button.button("Próxima →", disabled=current_page >= page_count, key="orders.next"):
-            st.session_state["orders.page"] = current_page + 1
-            persist_value("orders.page", current_page + 1)
-            st.rerun()

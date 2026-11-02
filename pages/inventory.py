@@ -5,6 +5,7 @@ import streamlit as st
 from pandas.io.formats.style import Styler
 
 from components.layout import metric_card, section_heading
+from database.connection import get_session
 from models.entities import Category, Product, RecipeItem, Stock, StockMovement
 from services.domain import audit, move_stock, purchase_recommendations, stock_level
 from utils.formatting import currency, date_time, quantity
@@ -12,6 +13,78 @@ from utils.session_state import (
     persistent_checkbox, persistent_number_input, persistent_selectbox,
     persistent_text_input,
 )
+
+
+@st.fragment
+def _render_recipe_tab() -> None:
+    session = get_session()
+    try:
+        _render_recipe_content(session)
+    finally:
+        session.close()
+
+
+def _render_recipe_content(session: Session) -> None:
+    sellable = session.scalars(select(Product).where(Product.sale_price > 0).order_by(Product.name)).all()
+    ingredient_products = session.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.name)).all()
+    if not sellable or not ingredient_products:
+        st.info("Cadastre produtos vendáveis e insumos antes de montar fichas técnicas.")
+        return
+    sellable_by_id = {product.id: product for product in sellable}
+    ingredients_by_id = {product.id: product for product in ingredient_products}
+    sold_product_id = persistent_selectbox("Produto vendido", list(sellable_by_id),
+                                           key="inventory.recipe.product", default=sellable[0].id,
+                                           format_func=lambda value: f"{sellable_by_id[value].code} · {sellable_by_id[value].name}")
+    sold_product = sellable_by_id[sold_product_id]
+    responsible = st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO")
+    recipes = session.scalars(select(RecipeItem).where(RecipeItem.product_id == sold_product.id)
+                              .order_by(RecipeItem.id)).all()
+    st.markdown(f"**Ingredientes de {sold_product.name}**")
+    recipe_cost = 0.0
+    shown = 0
+    for recipe in recipes:
+        ingredient = ingredients_by_id.get(recipe.ingredient_id) or session.get(Product, recipe.ingredient_id)
+        if ingredient is None:
+            continue
+        shown += 1
+        recipe_cost += recipe.quantity * ingredient.cost_price
+        first, second = st.columns([5, 1])
+        first.write(f"{quantity(recipe.quantity)} {ingredient.unit} · {ingredient.name}")
+        if second.button("Remover", key=f"remove_recipe_{recipe.id}"):
+            audit(session, "Item removido da ficha técnica", f"{sold_product.name} · {ingredient.name}", responsible)
+            session.delete(recipe)
+            session.commit()
+            st.rerun(scope="fragment")
+    if shown:
+        st.caption(f"Custo estimado por unidade: {currency(recipe_cost)} · preço de venda: {currency(sold_product.sale_price)}")
+    else:
+        st.info("Este produto ainda não tem ingredientes. Adicione abaixo; sem ficha técnica, a baixa é feita no próprio produto.")
+    st.divider()
+    st.markdown("**Adicionar ou ajustar ingrediente**")
+    addable = [product for product in ingredient_products if product.id != sold_product.id]
+    if not addable:
+        st.info("Cadastre insumos para montar a ficha técnica.")
+        return
+    addable_by_id = {product.id: product for product in addable}
+    ingredient_id = persistent_selectbox("Ingrediente consumido", list(addable_by_id),
+                                         key="inventory.recipe.ingredient", default=addable[0].id,
+                                         format_func=lambda value: f"{addable_by_id[value].name} · {addable_by_id[value].unit}")
+    ingredient = addable_by_id[ingredient_id]
+    recipe_quantity = persistent_number_input(f"Quantidade consumida por unidade vendida ({ingredient.unit})",
+                                              key="inventory.recipe.quantity", default=1.0,
+                                              min_value=0.001, step=0.1, format="%.3f")
+    if st.button("Adicionar à ficha técnica", type="primary", key="inventory.recipe.submit"):
+        recipe = session.scalar(select(RecipeItem).where(RecipeItem.product_id == sold_product.id,
+                                                         RecipeItem.ingredient_id == ingredient.id))
+        if recipe:
+            recipe.quantity = recipe_quantity
+        else:
+            session.add(RecipeItem(product_id=sold_product.id, ingredient_id=ingredient.id, quantity=recipe_quantity))
+        audit(session, "Ficha técnica atualizada",
+              f"{sold_product.name}: {recipe_quantity:g} {ingredient.unit} {ingredient.name}", responsible)
+        session.commit()
+        st.toast("Ficha técnica atualizada.")
+        st.rerun(scope="fragment")
 
 
 def render(session: Session) -> None:
@@ -232,51 +305,7 @@ def render(session: Session) -> None:
                     st.success("Produto atualizado.")
                     st.rerun()
     with tabs[3]:
-        sellable = session.scalars(select(Product).where(Product.sale_price > 0).order_by(Product.name)).all()
-        ingredient_products = session.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.name)).all()
-        if not sellable or not ingredient_products:
-            st.info("Cadastre produtos vendáveis e insumos antes de montar fichas técnicas.")
-        else:
-            sellable_by_id = {product.id: product for product in sellable}
-            ingredients_by_id = {product.id: product for product in ingredient_products}
-            sold_product_id = persistent_selectbox("Produto vendido", list(sellable_by_id),
-                                                   key="inventory.recipe.product", default=sellable[0].id,
-                                                   format_func=lambda value: f"{sellable_by_id[value].code} · {sellable_by_id[value].name}")
-            ingredient_id = persistent_selectbox("Ingrediente consumido", list(ingredients_by_id),
-                                                 key="inventory.recipe.ingredient", default=ingredient_products[0].id,
-                                                 format_func=lambda value: f"{ingredients_by_id[value].name} · {ingredients_by_id[value].unit}")
-            sold_product = sellable_by_id[sold_product_id]
-            ingredient = ingredients_by_id[ingredient_id]
-            recipe_quantity = persistent_number_input("Quantidade consumida por unidade vendida",
-                                                      key="inventory.recipe.quantity", default=1.0,
-                                                      min_value=0.001, step=0.1, format="%.3f")
-            if st.button("Adicionar à ficha técnica", type="primary", key="inventory.recipe.submit"):
-                recipe = session.scalar(select(RecipeItem).where(RecipeItem.product_id == sold_product.id,
-                                                                 RecipeItem.ingredient_id == ingredient.id))
-                if recipe:
-                    recipe.quantity = recipe_quantity
-                else:
-                    session.add(RecipeItem(product_id=sold_product.id, ingredient_id=ingredient.id,
-                                           quantity=recipe_quantity))
-                audit(session, "Ficha técnica atualizada", f"{sold_product.name}: {recipe_quantity:g} {ingredient.unit} {ingredient.name}",
-                      st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
-                session.commit()
-                st.success("Ficha técnica atualizada.")
-                st.rerun()
-            recipes = session.scalars(select(RecipeItem).order_by(RecipeItem.product_id, RecipeItem.id)).all()
-            for recipe in recipes:
-                sold_product = session.get(Product, recipe.product_id)
-                ingredient = session.get(Product, recipe.ingredient_id)
-                if sold_product is None or ingredient is None:
-                    continue
-                first, second = st.columns([5, 1])
-                first.write(f"{sold_product.name}: {quantity(recipe.quantity)} {ingredient.unit} {ingredient.name}")
-                if second.button("Remover", key=f"remove_recipe_{recipe.id}"):
-                    audit(session, "Item removido da ficha técnica", f"{sold_product.name} · {ingredient.name}",
-                          st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
-                    session.delete(recipe)
-                    session.commit()
-                    st.rerun()
+        _render_recipe_tab()
     with tabs[4]:
         st.caption("Cálculo com saídas/perdas dos últimos 7 dias, comparadas aos 7 dias anteriores. Meta de cobertura: 14 dias.")
         suggestions = [item for item in recommendations if item["needs_action"]]

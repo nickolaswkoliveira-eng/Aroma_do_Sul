@@ -37,19 +37,31 @@ def _sales(session: Session, start: date, end: date):
                                                Order.status != "Cancelado").order_by(Order.created_at)).all()
 
 
-def _daily_closed_comandas(session: Session, target_day: date) -> list[Comanda]:
+def _period_label(target_day: date, end_day: date | None) -> str:
+    if end_day is None or end_day == target_day:
+        return f"{target_day:%d/%m/%Y}"
+    return f"{target_day:%d/%m/%Y} a {end_day:%d/%m/%Y}"
+
+
+def _daily_closed_comandas(session: Session, target_day: date, end_day: date | None = None) -> list[Comanda]:
+    end_day = end_day or target_day
     return session.scalars(
         select(Comanda)
         .where(
             Comanda.status == "Fechada",
-            func.date(Comanda.closed_at) == target_day,
+            func.date(Comanda.closed_at) >= target_day,
+            func.date(Comanda.closed_at) <= end_day,
         )
         .order_by(Comanda.closed_at)
     ).all()
 
 
-def _daily_sales_dataframe(session: Session, target_day: date) -> tuple[pd.DataFrame, dict]:
-    comandas = _daily_closed_comandas(session, target_day)
+def _daily_sales_dataframe(
+    session: Session, target_day: date, end_day: date | None = None
+) -> tuple[pd.DataFrame, dict]:
+    end_day = end_day or target_day
+    is_range = end_day != target_day
+    comandas = _daily_closed_comandas(session, target_day, end_day)
     if not comandas:
         return pd.DataFrame(), {"total": 0.0, "count": 0, "ticket": 0.0, "by_method": {}}
     comanda_ids = [item.id for item in comandas]
@@ -57,7 +69,8 @@ def _daily_sales_dataframe(session: Session, target_day: date) -> tuple[pd.DataF
         select(CashMovement)
         .where(
             CashMovement.movement_type == "Entrada",
-            func.date(CashMovement.created_at) == target_day,
+            func.date(CashMovement.created_at) >= target_day,
+            func.date(CashMovement.created_at) <= end_day,
         )
         .order_by(CashMovement.created_at)
     ).all()
@@ -84,7 +97,7 @@ def _daily_sales_dataframe(session: Session, target_day: date) -> tuple[pd.DataF
         total += amount
         by_method[method] = by_method.get(method, 0.0) + amount
         rows.append({
-            "Hora": comanda.closed_at.strftime("%H:%M") if comanda.closed_at else "-",
+            "Hora": comanda.closed_at.strftime("%d/%m %H:%M" if is_range else "%H:%M") if comanda.closed_at else "-",
             "Comanda": comanda.id,
             "Mesa": f"{comanda.table_number:02d}" if comanda.table_number is not None else "-",
             "Pedidos": int(order_count_by_comanda.get(comanda.id, 0)),
@@ -101,12 +114,12 @@ def _daily_sales_dataframe(session: Session, target_day: date) -> tuple[pd.DataF
     return frame, summary
 
 
-def _daily_sales_excel(frame: pd.DataFrame, summary: dict, target_day: date) -> bytes:
+def _daily_sales_excel(frame: pd.DataFrame, summary: dict, target_day: date, end_day: date | None = None) -> bytes:
     output = BytesIO()
     methods = summary.get("by_method", {})
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         header = pd.DataFrame([{
-            "Data": target_day.strftime("%d/%m/%Y"),
+            "Data": _period_label(target_day, end_day),
             "Total vendido": summary["total"],
             "Comandas fechadas": summary["count"],
             "Ticket médio": summary["ticket"],
@@ -123,7 +136,7 @@ def _daily_sales_excel(frame: pd.DataFrame, summary: dict, target_day: date) -> 
     return output.getvalue()
 
 
-def _daily_sales_pdf(frame: pd.DataFrame, summary: dict, target_day: date) -> bytes:
+def _daily_sales_pdf(frame: pd.DataFrame, summary: dict, target_day: date, end_day: date | None = None) -> bytes:
     try:
         from fpdf import FPDF
         from fpdf.enums import XPos, YPos
@@ -134,9 +147,9 @@ def _daily_sales_pdf(frame: pd.DataFrame, summary: dict, target_day: date) -> by
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "Relatório diário de vendas", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 10, "Relatório de vendas", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 8, f"Data: {target_day:%d/%m/%Y}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 8, f"Período: {_period_label(target_day, end_day)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.cell(0, 8, f"Total vendido: {currency(summary['total'])}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.cell(
         0,
@@ -155,19 +168,19 @@ def _daily_sales_pdf(frame: pd.DataFrame, summary: dict, target_day: date) -> by
             pdf.cell(0, 7, f"{method}: {currency(value)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.ln(2)
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(25, 8, "Hora", border=1)
+    pdf.cell(30, 8, "Hora", border=1)
     pdf.cell(25, 8, "Comanda", border=1)
     pdf.cell(20, 8, "Mesa", border=1)
     pdf.cell(20, 8, "Pedidos", border=1)
-    pdf.cell(55, 8, "Forma", border=1)
+    pdf.cell(50, 8, "Forma", border=1)
     pdf.cell(40, 8, "Valor", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("Helvetica", "", 10)
     for row in frame.itertuples(index=False):
-        pdf.cell(25, 7, str(row[0]), border=1)
+        pdf.cell(30, 7, str(row[0]), border=1)
         pdf.cell(25, 7, str(row[1]), border=1)
         pdf.cell(20, 7, str(row[2]), border=1)
         pdf.cell(20, 7, str(row[3]), border=1)
-        pdf.cell(55, 7, str(row[4])[:27], border=1)
+        pdf.cell(50, 7, str(row[4])[:25], border=1)
         pdf.cell(40, 7, currency(float(row[5])), border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     return bytes(pdf.output())
 
@@ -253,22 +266,41 @@ def _sales_report(session: Session, basic: bool = False) -> None:
         st.info("Sem vendas no período selecionado.")
 
     st.subheader("Consulta diária de vendas")
+    consult_mode = st.radio(
+        "Tipo de consulta",
+        ["Um dia", "Período"],
+        horizontal=True,
+        key="reports.daily_sales_mode",
+    )
     target_day = persistent_date_input(
-        "Selecione a data",
+        "Selecione a data" if consult_mode == "Um dia" else "Data inicial",
         key="reports.daily_sales_date",
         default=local_today(),
         format="DD/MM/YYYY",
     )
-    daily_frame, summary = _daily_sales_dataframe(session, target_day)
+    end_day = None
+    if consult_mode == "Período":
+        end_day = persistent_date_input(
+            "Data final",
+            key="reports.daily_sales_end_date",
+            default=local_today(),
+            format="DD/MM/YYYY",
+        )
+        if end_day < target_day:
+            st.error("A data final não pode ser anterior à data inicial.")
+            return
+    period_text = _period_label(target_day, end_day)
+    file_suffix = f"{target_day:%Y-%m-%d}" if end_day is None else f"{target_day:%Y-%m-%d}_a_{end_day:%Y-%m-%d}"
+    daily_frame, summary = _daily_sales_dataframe(session, target_day, end_day)
     daily_metrics = st.columns(3)
     with daily_metrics[0]:
-        metric_card("Total vendido no dia", currency(summary["total"]), f"{target_day:%d/%m/%Y}")
+        metric_card("Total vendido", currency(summary["total"]), period_text)
     with daily_metrics[1]:
         metric_card("Comandas fechadas", str(summary["count"]), "Recebimentos no caixa")
     with daily_metrics[2]:
         metric_card("Ticket médio", currency(summary["ticket"]), "Total dividido por comandas")
     if daily_frame.empty:
-        st.info("Sem vendas registradas para a data selecionada.")
+        st.info("Sem vendas registradas para o período selecionado.")
     else:
         by_method = summary.get("by_method", {})
         method_frame = pd.DataFrame(
@@ -304,19 +336,19 @@ def _sales_report(session: Session, basic: bool = False) -> None:
         export_columns = st.columns(2)
         with export_columns[0]:
             st.download_button(
-                "Exportar Excel do dia",
-                data=_daily_sales_excel(daily_frame, summary, target_day),
-                file_name=f"vendas_{target_day:%Y-%m-%d}.xlsx",
+                "Exportar Excel",
+                data=_daily_sales_excel(daily_frame, summary, target_day, end_day),
+                file_name=f"vendas_{file_suffix}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="reports.daily_sales_export_excel",
             )
         with export_columns[1]:
             try:
-                pdf_data = _daily_sales_pdf(daily_frame, summary, target_day)
+                pdf_data = _daily_sales_pdf(daily_frame, summary, target_day, end_day)
                 st.download_button(
-                    "Exportar PDF do dia",
+                    "Exportar PDF",
                     data=pdf_data,
-                    file_name=f"vendas_{target_day:%Y-%m-%d}.pdf",
+                    file_name=f"vendas_{file_suffix}.pdf",
                     mime="application/pdf",
                     key="reports.daily_sales_export_pdf",
                 )

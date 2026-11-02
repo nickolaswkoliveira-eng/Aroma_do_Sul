@@ -100,6 +100,9 @@ def configure_page() -> None:
     a { color: #464FEB; text-decoration: none; }
     a:hover { text-decoration: underline; }
     :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    [data-stale="true"], [data-testid="stAppViewContainer"] [data-stale="true"] { opacity: 1 !important; transition: none !important; }
+    [data-testid="stApp"] *, [data-testid="stAppViewContainer"] * { animation-duration: 0s !important; }
+    [data-testid="stStatusWidget"], [data-testid="stAppViewBlockContainer"] > [data-testid="stSkeleton"] { display: none !important; }
     div[class*="st-key-module_card_"] { min-height: 176px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; transition: border-color .16s ease, background-color .16s ease; }
     div[class*="st-key-module_card_"]:hover { background: #FCFAF7; border-color: var(--accent); }
     .module-icon { font-size: 1.5rem; line-height: 1; margin-bottom: .7rem; }
