@@ -206,6 +206,8 @@ def _render_data_reset(session) -> None:
             st.download_button("Baixar backup", data=data, file_name=file_name, mime=mime,
                                key="settings.reset_backup_download")
             st.caption("O arquivo contém todos os dados e os usuários (com senhas em hash). Guarde-o em local seguro.")
+            if "portatil" in file_name:
+                st.info("Backup portátil (SQLite): o pg_dump não está instalado neste servidor, então as tabelas foram copiadas diretamente.")
         user_id = st.session_state.get("user_id")
         user = session.get(User, user_id) if user_id else None
         password = ""
