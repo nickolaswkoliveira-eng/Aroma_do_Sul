@@ -1,18 +1,40 @@
 from datetime import datetime
+from pathlib import Path
+import tempfile
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from models.entities import (
-    Audit, CashFlow, CashMovement, CashSession, Category, Comanda, ComandaOrder, Customer,
+    Audit, Base, CashFlow, CashMovement, CashSession, Category, Comanda, ComandaOrder, Customer,
     DemoRecord, Ingredient, Order, OrderItem, Payable, Product, Receivable, RecipeItem,
     Stock, StockMovement,
 )
 from services.database_backup import export_sqlite_backup
-from services.postgres_backup import dump_database
+from services.postgres_backup import BackupError, dump_database
 
 RESET_CONFIRMATION_PHRASE = "APAGAR TUDO"
+# Tokens de sessão não fazem parte de um backup de dados.
+_EXCLUDED_BACKUP_TABLES = {"sessoes_usuario"}
+
+
+def export_portable_backup(engine: Engine) -> bytes:
+    """Copia todas as tabelas para um SQLite; não depende de pg_dump."""
+    tables = [table for table in Base.metadata.sorted_tables if table.name not in _EXCLUDED_BACKUP_TABLES]
+    with tempfile.TemporaryDirectory(prefix="cafeteria-portable-") as directory:
+        destination = Path(directory) / "backup.sqlite3"
+        target = create_engine(f"sqlite:///{destination}")
+        try:
+            Base.metadata.create_all(target, tables=tables)
+            with engine.connect() as source, target.begin() as sink:
+                for table in tables:
+                    rows = [dict(row) for row in source.execute(select(table)).mappings()]
+                    for start in range(0, len(rows), 1000):
+                        sink.execute(table.insert(), rows[start:start + 1000])
+        finally:
+            target.dispose()
+        return destination.read_bytes()
 
 
 def build_backup_download(engine: Engine, database_url: str, now: datetime) -> tuple[bytes, str, str]:
@@ -20,7 +42,13 @@ def build_backup_download(engine: Engine, database_url: str, now: datetime) -> t
     stamp = f"{now:%Y%m%d-%H%M%S}"
     if engine.url.drivername.startswith("sqlite"):
         return export_sqlite_backup(engine), f"cafeteria-backup-{stamp}.sqlite3", "application/vnd.sqlite3"
-    return dump_database(database_url), f"cafeteria-backup-{stamp}.dump", "application/octet-stream"
+    try:
+        return dump_database(database_url), f"cafeteria-backup-{stamp}.dump", "application/octet-stream"
+    except BackupError as error:
+        if "não encontrada" not in str(error):
+            raise
+    return (export_portable_backup(engine), f"cafeteria-backup-portatil-{stamp}.sqlite3",
+            "application/vnd.sqlite3")
 
 # Filhos antes dos pais, para respeitar as chaves estrangeiras.
 _RESET_ORDER = (

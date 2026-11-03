@@ -1,11 +1,13 @@
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import streamlit as st
+import streamlit.components.v1 as components
 
 from components.layout import metric_card, section_heading
 from database.connection import get_session
 from models.entities import CashSession, Category, Comanda, Customer, Order, OrderItem, Product, Stock
 from services.domain import TABLE_MAX, create_order
+from services.kitchen_ticket import build_kitchen_ticket_html
 from utils.clock import local_today
 from utils.formatting import currency, date_time
 from utils.session_state import (
@@ -108,6 +110,17 @@ def _render_order_builder_content(session: Session, quick_mode: bool, locked_tab
     flash = st.session_state.pop("orders.flash", None)
     if flash:
         st.success(flash)
+    print_now = st.session_state.pop("orders.print_now", None)
+    if print_now:
+        components.html(print_now, height=0)
+    with st.expander("🖨️ Impressão da cozinha (80 mm)"):
+        st.toggle("Imprimir automaticamente ao finalizar", value=True, key="orders.auto_print")
+        last_ticket = st.session_state.get("orders.last_ticket")
+        if last_ticket and st.button("Reimprimir último pedido", key="orders.reprint"):
+            st.session_state["orders.print_now"] = last_ticket.replace(
+                "</body>", "<script>window.onload=function(){window.focus();window.print();};</script></body>")
+            st.rerun(scope="fragment")
+        st.caption("Na janela de impressão, escolha a I7 Plus e papel 80 mm. Dica: ative a impressão direta (kiosk) no navegador para não abrir a janela.")
     products = session.scalars(select(Product).where(Product.active.is_(True), Product.sale_price > 0).order_by(Product.name)).all()
     categories = session.scalars(select(Category).where(Category.active.is_(True)).order_by(Category.name)).all()
     open_comandas = session.scalars(
@@ -378,6 +391,9 @@ def _render_order_builder_content(session: Session, quick_mode: bool, locked_tab
                         "registrado com entrega imediata." if created.status == "Finalizado"
                         else "enviado para preparo."
                     )
+                    st.session_state["orders.last_ticket"] = build_kitchen_ticket_html(session, created)
+                    if st.session_state.get("orders.auto_print", True):
+                        st.session_state["orders.print_now"] = build_kitchen_ticket_html(session, created, auto_print=True)
                     st.session_state["orders.flash"] = (
                         f"Pedido #{created.id} {outcome}"
                         + table_suffix
