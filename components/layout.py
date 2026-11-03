@@ -100,6 +100,10 @@ def configure_page() -> None:
     a { color: #464FEB; text-decoration: none; }
     a:hover { text-decoration: underline; }
     :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    [data-testid="stExpander"] details, [data-testid="stExpander"] summary { background: var(--surface) !important; color: var(--ink) !important; }
+    [data-testid="stExpander"] summary:hover, [data-testid="stExpander"] summary:focus, [data-testid="stExpander"] summary:active { background: #FCFAF7 !important; color: var(--ink) !important; }
+    [data-testid="stExpander"] summary * { color: var(--ink) !important; }
+    [data-testid="stToggle"] label, [data-testid="stToggle"] label * { background: transparent !important; color: var(--ink) !important; }
     [data-stale="true"], [data-testid="stAppViewContainer"] [data-stale="true"] { opacity: 1 !important; transition: none !important; }
     [data-testid="stApp"] *, [data-testid="stAppViewContainer"] * { animation-duration: 0s !important; }
     [data-testid="stStatusWidget"], [data-testid="stAppViewBlockContainer"] > [data-testid="stSkeleton"] { display: none !important; }
