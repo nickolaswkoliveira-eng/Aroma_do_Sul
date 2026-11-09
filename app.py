@@ -264,7 +264,8 @@ def main() -> None:
                 ),
             )
         elif selected == "Pedidos":
-            render_qr()
+            if not quick_access_mode:
+                render_qr()
             render_function(session)
         else:
             render_function(session)

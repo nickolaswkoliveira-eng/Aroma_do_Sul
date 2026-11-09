@@ -14,6 +14,7 @@ from config import (
 from database.connection import demo_engine, engine
 from models.entities import Audit, Category, DemoRecord, Order, Product, User
 from services.auth import verify_password
+from services.manager_pin import has_manager_pin, set_manager_pin
 from services.data_reset import (
     RESET_CONFIRMATION_PHRASE, build_backup_download, clear_all_data, count_resettable_records,
 )
@@ -176,6 +177,35 @@ def _render_homologation(session) -> None:
             st.session_state.pop("settings.demo_backup_download", None)
         except (SQLAlchemyError, OSError, ValueError, sqlite3.Error) as error:
             st.error(f"Não foi possível importar o backup: {error}")
+
+
+def _render_manager_pin(session) -> None:
+    st.subheader("PIN de desconto")
+    with st.expander("PIN do gerente para liberar descontos"):
+        st.caption(
+            "Todo desconto em comanda exige este PIN de 4 dígitos. Escolha um número que só o gerente conheça. "
+            + ("Já existe um PIN definido; informar um novo substitui o atual." if has_manager_pin(session)
+               else "Nenhum PIN definido ainda: descontos ficam bloqueados até você definir.")
+        )
+        user_id = st.session_state.get("user_id")
+        user = session.get(User, user_id) if user_id else None
+        nonce = st.session_state.get("settings.pin_nonce", 0)
+        password = ""
+        if user is not None:
+            password = st.text_input("Sua senha", type="password", key=f"settings.pin_password_{nonce}")
+        new_pin = st.text_input("Novo PIN (4 dígitos)", type="password", max_chars=4, key=f"settings.pin_new_{nonce}")
+        if st.button("Salvar PIN", key="settings.pin_save"):
+            if user is not None and not verify_password(password, user.password_hash):
+                st.error("Senha incorreta.")
+                return
+            try:
+                set_manager_pin(session, new_pin, st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"))
+            except ValueError as error:
+                st.error(str(error))
+                return
+            st.session_state["settings.pin_nonce"] = nonce + 1
+            st.toast("PIN do gerente salvo.")
+            st.rerun()
 
 
 def _render_data_reset(session) -> None:
@@ -352,6 +382,7 @@ def render(session) -> None:
             )
     if MODO_DEMONSTRACAO:
         _render_homologation(session)
+    _render_manager_pin(session)
     _render_data_reset(session)
     st.subheader("Auditoria recente")
     page_size = 15

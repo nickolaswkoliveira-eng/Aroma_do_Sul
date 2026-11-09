@@ -132,7 +132,41 @@ def _render_queue(tv_mode: bool, responsible: str) -> None:
         session.close()
 
 
+def _render_compact_status(session) -> None:
+    now = local_now()
+    active = session.scalars(
+        select(Order).where(Order.status != "Finalizado").order_by(Order.created_at)
+    ).all()
+    if not active:
+        st.success("Nenhum pedido em andamento.")
+        return
+    items_by_order, products_by_id = _load_order_items_map(session, [order.id for order in active])
+    icons = {"Recebido": "🕐", "Em preparo": "🔥", "Pronto": "✅", "Entregue": "📦"}
+    for order in active:
+        table_label = f"Mesa {order.table_number:02d}" if order.table_number is not None else "Sem mesa"
+        with st.container(key=f"kitchen_order_{order.id}"):
+            minutes = int((now - order.created_at).total_seconds() // 60)
+            st.markdown(f"**{icons.get(order.status, '')} {order.status}** · #{order.id} · {table_label} · {minutes} min")
+            st.caption(", ".join(
+                f"{item.quantity}× {products_by_id[item.product_id].name if item.product_id in products_by_id else 'Produto'}"
+                for item in items_by_order.get(order.id, [])
+            ))
+
+
+@st.fragment(run_every="8s")
+def _render_compact_status_live() -> None:
+    session = get_session()
+    try:
+        _render_compact_status(session)
+    finally:
+        session.close()
+
+
 def render(_session) -> None:
+    if st.query_params.get("acesso") == "atendimento":
+        st.title("Status dos pedidos")
+        _render_compact_status_live()
+        return
     tv_mode = persistent_toggle("Modo TV", key="kitchen.tv_mode", default=False)
     live_refresh = persistent_toggle("Atualizar automaticamente (8s)", key="kitchen.live_refresh", default=True)
     if tv_mode:

@@ -7,7 +7,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from models.entities import (
-    Audit, Base, CashFlow, CashMovement, CashSession, Category, Comanda, ComandaOrder, Customer,
+    Audit, Base, CashFlow, CashMovement, CashSession, Category, Comanda, ComandaOrder, ComandaPayment, Customer,
+    OwnConsumption,
     DemoRecord, Ingredient, Order, OrderItem, Payable, Product, Receivable, RecipeItem,
     Stock, StockMovement,
 )
@@ -52,7 +53,7 @@ def build_backup_download(engine: Engine, database_url: str, now: datetime) -> t
 
 # Filhos antes dos pais, para respeitar as chaves estrangeiras.
 _RESET_ORDER = (
-    ComandaOrder, OrderItem, Order, Comanda, Customer,
+    ComandaPayment, ComandaOrder, OrderItem, Order, Comanda, Customer, OwnConsumption,
     CashMovement, CashSession, CashFlow, Payable, Receivable,
     StockMovement, Stock, RecipeItem, Ingredient, Product, Category,
     DemoRecord, Audit,

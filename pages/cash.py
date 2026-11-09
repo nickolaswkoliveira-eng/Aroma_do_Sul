@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 import streamlit as st
 
 from components.layout import metric_card, section_heading
-from models.entities import CashMovement, CashSession, ComandaOrder, Order, OrderItem, Product
-from services.domain import add_cash_movement, cash_balance, close_cash, open_cash
+from models.entities import CashMovement, CashSession, ComandaOrder, Order, OrderItem, OwnConsumption, Product
+from services.domain import add_cash_movement, cash_balance, close_cash, open_cash, register_own_consumption
 from utils.formatting import currency, date_time
 from utils.session_state import persistent_number_input, persistent_selectbox, persistent_text_input
 
@@ -20,14 +20,17 @@ def _build_cash_close_excel(session: Session, cash_session: CashSession) -> byte
         .where(CashMovement.cash_session_id == cash_session.id)
         .order_by(CashMovement.created_at)
     ).all()
-    payment_by_comanda: dict[int, str] = {}
+    methods_by_comanda: dict[int, list[str]] = {}
     for movement in movements:
         if movement.description.startswith("Comanda #"):
             try:
                 comanda_id = int(movement.description.split("#", 1)[1].strip())
             except ValueError:
                 continue
-            payment_by_comanda[comanda_id] = movement.method
+            methods_by_comanda.setdefault(comanda_id, []).append(movement.method)
+    payment_by_comanda = {
+        comanda_id: " + ".join(dict.fromkeys(methods)) for comanda_id, methods in methods_by_comanda.items()
+    }
     orders = session.scalars(
         select(Order).where(
             Order.status == "Finalizado",
@@ -85,6 +88,40 @@ def _build_cash_close_excel(session: Session, cash_session: CashSession) -> byte
     return output.getvalue()
 
 
+def _render_own_consumption(session: Session) -> None:
+    st.subheader("Consumo próprio")
+    st.caption("Baixa o estoque e registra o custo como perda. Não altera o saldo do caixa.")
+    products = session.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.name)).all()
+    options = {f"{product.name} ({product.code})": product.id for product in products}
+    if not options:
+        st.info("Nenhum produto cadastrado.")
+        return
+    first, second, third = st.columns([2, 1, 1.5])
+    with first:
+        label = st.selectbox("Produto", list(options), key="cash.own.product")
+    with second:
+        quantity = st.number_input("Quantidade", min_value=1, step=1, value=1, key="cash.own.quantity")
+    with third:
+        consumed_by = st.text_input("Quem consumiu (opcional)", key="cash.own.by")
+    if st.button("Registrar consumo próprio", key="cash.own.submit"):
+        try:
+            cost = register_own_consumption(
+                session, options[label], int(quantity), consumed_by,
+                responsible=st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO"),
+            )
+            st.success(f"Consumo registrado. Perda de {currency(cost)}.")
+            st.rerun()
+        except ValueError as error:
+            st.error(str(error))
+    recent = session.scalars(select(OwnConsumption).order_by(OwnConsumption.created_at.desc()).limit(10)).all()
+    if recent:
+        names = {product.id: product.name for product in products}
+        st.dataframe([{
+            "Data": date_time(item.created_at), "Produto": names.get(item.product_id, "-"),
+            "Qtd": item.quantity, "Custo": currency(item.total_cost), "Quem": item.consumed_by or "-",
+        } for item in recent], width="stretch", hide_index=True)
+
+
 def render(session: Session) -> None:
     section_heading("Caixa", "Abertura, recebimentos, saídas e fechamento")
     cash = session.scalar(select(CashSession).where(CashSession.is_open.is_(True)))
@@ -121,6 +158,7 @@ def render(session: Session) -> None:
             st.dataframe([{"Operador": item.operator, "Abertura": date_time(item.opened_at),
                            "Saldo inicial": currency(item.opening_balance), "Saldo final": currency(item.closing_balance or 0),
                            "Status": "Aberto" if item.is_open else "Fechado"} for item in history], width="stretch", hide_index=True)
+        _render_own_consumption(session)
         return
     balance = cash_balance(session, cash)
     cols = st.columns(3)
@@ -149,6 +187,7 @@ def render(session: Session) -> None:
     if movements:
         st.dataframe([{"Data": date_time(item.created_at), "Tipo": item.movement_type, "Forma": item.method,
                        "Valor": currency(item.amount), "Descrição": item.description} for item in movements], width="stretch", hide_index=True)
+    _render_own_consumption(session)
     if st.button("Fechar caixa", type="secondary"):
         final = close_cash(session, cash)
         st.session_state["cash.last_closed_id"] = cash.id

@@ -6,11 +6,146 @@ import streamlit as st
 
 from components.layout import metric_card, section_heading
 from models.entities import CashSession, Comanda, ComandaOrder, Customer, Order, OrderItem, Product
-from services.domain import TABLE_MAX, assign_comanda_table, close_comanda
+from services.domain import (
+    PAYMENT_METHODS, TABLE_MAX, apply_comanda_discount, assign_comanda_table, close_comanda,
+    comanda_balance, discount_from_percent, equal_share, receive_comanda_payment,
+    remove_comanda_discount,
+)
+from services.manager_pin import has_manager_pin
 from utils.formatting import currency, date_time
 
 
-PAYMENT_METHODS = ("Dinheiro", "Pix", "Crédito", "Débito")
+def _acting_user() -> str:
+    return st.session_state.get("acting_user", "SISTEMA_HOMOLOGACAO")
+
+
+def _summary_strip(balance: dict[str, float]) -> None:
+    cells = [("Subtotal", currency(balance["subtotal"]), "")]
+    if balance["discount"] > 0:
+        cells.append(("Desconto", f"−{currency(balance['discount'])}", "#8A4B2A"))
+    if balance["paid"] > 0:
+        cells.append(("Já pago", currency(balance["paid"]), "#2F6B3D"))
+    cells.append(("Falta pagar", currency(balance["remaining"]), "var(--espresso)"))
+    html = "".join(
+        f'<div style="flex:1 1 110px;background:var(--surface);border:1px solid var(--line);border-radius:8px;'
+        f'padding:.5rem .7rem"><div style="color:var(--muted);font-size:.72rem">{label}</div>'
+        f'<div style="font-weight:700;font-size:1.05rem;color:{color or "var(--ink)"}">{value}</div></div>'
+        for label, value, color in cells
+    )
+    st.markdown(f'<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin:.2rem 0 .8rem">{html}</div>',
+                unsafe_allow_html=True)
+
+
+def _render_discount_panel(session: Session, comanda: Comanda, balance: dict[str, float]) -> None:
+    applied = balance["discount"]
+    if not has_manager_pin(session):
+        st.caption("Desconto indisponível: o gerente ainda não definiu o PIN em Configurações.")
+        return
+    if applied > 0:
+        st.caption(f"Desconto aplicado: {currency(applied)} · {comanda.discount_reason or 'sem motivo informado'}")
+        if st.button("Remover desconto", key=f"comanda_discount_remove_{comanda.id}"):
+            try:
+                remove_comanda_discount(session, comanda, _acting_user())
+                st.toast("Desconto removido.")
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
+    label = "Alterar desconto" if applied > 0 else "Dar desconto"
+    if not st.toggle(label, key=f"comanda_discount_toggle_{comanda.id}"):
+        return
+    nonce = st.session_state.get(f"comanda_discount_nonce_{comanda.id}", 0)
+    suffix = f"{comanda.id}_{nonce}"
+    kind = st.segmented_control(
+        "Tipo", ("R$", "%"), default="R$", key=f"comanda_discount_kind_{comanda.id}",
+    ) or "R$"
+    value = st.number_input(
+        "Valor do desconto" + (" (%)" if kind == "%" else " (R$)"), min_value=0.0, value=0.0, step=1.0,
+        format="%.2f", key=f"comanda_discount_value_{suffix}",
+    )
+    if kind == "%" and value > 0 and value < 100:
+        st.caption(f"Equivale a {currency(discount_from_percent(balance['subtotal'], value))}")
+    reason_text = st.text_input("Motivo (opcional)", max_chars=160, key=f"comanda_discount_reason_{suffix}")
+    pin = st.text_input("PIN do gerente", type="password", max_chars=4, key=f"comanda_discount_pin_{suffix}")
+    if st.button("Aplicar desconto", key=f"comanda_discount_apply_{comanda.id}", type="primary", width="stretch"):
+        st.session_state[f"comanda_discount_nonce_{comanda.id}"] = nonce + 1
+        try:
+            amount = discount_from_percent(balance["subtotal"], value) if kind == "%" else value
+            apply_comanda_discount(session, comanda, amount, reason_text, pin, _acting_user())
+            st.toast(f"Desconto de {currency(amount)} aplicado.")
+            st.rerun()
+        except ValueError as error:
+            st.error(str(error))
+
+
+def _render_payment_panel(session: Session, comanda: Comanda, balance: dict[str, float], blocked: bool) -> None:
+    remaining = balance["remaining"]
+    if remaining <= 0:
+        st.caption("Sem saldo a receber.")
+        return
+    cents = int(round(remaining * 100))
+    mode = st.segmented_control(
+        "Como receber", ("Valor total", "Dividir igualmente", "Valor livre"),
+        default="Valor total", key=f"comanda_mode_{comanda.id}",
+    ) or "Valor total"
+    method = st.segmented_control(
+        "Forma de pagamento", PAYMENT_METHODS, default=PAYMENT_METHODS[0], key=f"comanda_payment_{comanda.id}",
+    ) or PAYMENT_METHODS[0]
+    people = 1
+    if mode == "Valor total":
+        amount = remaining
+    elif mode == "Dividir igualmente":
+        left = st.session_state.get(f"comanda_split_left_{comanda.id}", 2)
+        people = int(st.number_input(
+            "Pessoas que ainda vão pagar", min_value=1, max_value=30, value=min(left, 30), step=1,
+            key=f"comanda_people_{comanda.id}_{left}",
+        ))
+        amount = equal_share(remaining, people)
+        st.caption(
+            f"Valor desta pessoa: {currency(amount)}"
+            + (" · a última paga o que sobrar" if people > 1 else "")
+        )
+    else:
+        amount = st.number_input(
+            "Valor a receber", min_value=0.01, max_value=remaining, value=remaining, step=1.0, format="%.2f",
+            key=f"comanda_amount_{comanda.id}_{cents}",
+        )
+    if method == "Dinheiro" and st.toggle("Calcular troco", key=f"comanda_change_{comanda.id}"):
+        given = st.number_input(
+            "Valor entregue pelo cliente", min_value=0.0, value=0.0, step=1.0, format="%.2f",
+            key=f"comanda_given_{comanda.id}_{cents}_{int(round(amount * 100))}",
+        )
+        if given >= amount > 0:
+            st.success(f"Troco: {currency(given - amount)}")
+        elif given > 0:
+            st.warning(f"Faltam {currency(amount - given)} do valor entregue.")
+    if st.button(
+        f"Receber {currency(amount)} em {method}",
+        key=f"comanda_close_{comanda.id}",
+        type="primary",
+        width="stretch",
+        disabled=blocked,
+    ):
+        try:
+            result = receive_comanda_payment(session, comanda, method, amount, _acting_user())
+            if mode == "Dividir igualmente":
+                st.session_state[f"comanda_split_left_{comanda.id}"] = max(people - 1, 1)
+            if result["closed"]:
+                st.toast(f"Comanda #{comanda.id} fechada. Recebido {currency(result['amount'])}.")
+            else:
+                st.toast(f"Recebido {currency(result['amount'])}. Falta {currency(result['remaining'])}.")
+            st.rerun()
+        except ValueError as error:
+            st.error(str(error))
+
+
+def _render_checkout(session: Session, comanda: Comanda, balance: dict[str, float], blocked: bool) -> None:
+    in_progress = balance["paid"] > 0 or balance["discount"] > 0
+    title = f"💳 Receber pagamento · Falta {currency(balance['remaining'])}"
+    with st.expander(title, expanded=in_progress):
+        _summary_strip(balance)
+        _render_discount_panel(session, comanda, balance)
+        st.divider()
+        _render_payment_panel(session, comanda, balance, blocked)
 
 
 def _customer_label(session: Session, comanda: Comanda) -> str:
@@ -116,7 +251,7 @@ def render(
                 batch_labels = {
                     comanda.id: (
                         f"Mesa {comanda.table_number:02d} · Comanda #{comanda.id} · "
-                        f"{currency(comanda.total)}"
+                        f"{currency(comanda_balance(session, comanda)['remaining'])}"
                     )
                     for comanda in ready
                 }
@@ -175,7 +310,10 @@ def render(
             table_label = f"Mesa {comanda.table_number:02d}" if comanda.table_number is not None else "Sem mesa"
             st.markdown(f"### Comanda #{comanda.id} · {table_label} · {escape(customer_name)}")
             st.caption(f"Aberta às {date_time(comanda.created_at)}")
-            st.markdown(f"**Total da conta · {currency(comanda.total)}**")
+            balance = comanda_balance(session, comanda)
+            st.markdown(f"**Total da conta · {currency(balance['subtotal'])}**")
+            if balance["discount"] > 0 or balance["paid"] > 0:
+                st.caption(f"Falta pagar {currency(balance['remaining'])}")
             for order in comanda_orders:
                 st.markdown(f"**Pedido #{order.id} · {order.status}**")
                 items = items_by_order.get(order.id, [])
@@ -191,7 +329,7 @@ def render(
                     "Há pedidos em preparo. A conta poderá ser fechada quando "
                     "todos forem finalizados na cozinha."
                 )
-            actions = st.columns([1, 1, 1, 2])
+            actions = st.columns([1, 1])
             if can_add:
                 with actions[0]:
                     if st.button(
@@ -230,40 +368,10 @@ def render(
                         st.rerun()
                     except ValueError as error:
                         st.error(str(error))
-            if can_close:
-                with actions[2]:
-                    method = st.selectbox(
-                        "Pagamento",
-                        PAYMENT_METHODS,
-                        key=f"comanda_payment_{comanda.id}",
-                        label_visibility="collapsed",
-                    )
-                with actions[3]:
-                    if st.button(
-                        "Fechar e receber",
-                        key=f"comanda_close_{comanda.id}",
-                        type="primary",
-                        width="stretch",
-                        disabled=bool(pending_orders) or not cash_is_open,
-                    ):
-                        try:
-                            total = close_comanda(
-                                session,
-                                comanda,
-                                method,
-                                st.session_state.get(
-                                    "acting_user", "SISTEMA_HOMOLOGACAO"
-                                ),
-                            )
-                            st.success(
-                                f"Comanda #{comanda.id} fechada. "
-                                f"Recebido {currency(total)}."
-                            )
-                            st.rerun()
-                        except ValueError as error:
-                            st.error(str(error))
-            else:
+            if not can_close:
                 actions[1].caption("A cobrança é restrita ao Caixa.")
             if not cash_is_open:
                 st.warning("Caixa fechado: abertura obrigatória para novos pedidos e recebimentos.")
+            if can_close:
+                _render_checkout(session, comanda, balance, bool(pending_orders) or not cash_is_open)
             st.divider()

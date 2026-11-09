@@ -29,8 +29,8 @@ class AppStateTests(unittest.TestCase):
         app.query_params["acesso"] = "atendimento"
         app.query_params["mesa"] = "02"
         app.run()
-        captions = "\n".join(element.value for element in app.caption)
-        self.assertIn("Modo atendimento ativo · Mesa 02", captions)
+        titles = "\n".join(element.value for element in app.title)
+        self.assertIn("Novo pedido · Mesa 02", titles)
         self.assertEqual(app.session_state["active_page"], "Pedidos")
         self.assertEqual(len(app.exception), 0)
 

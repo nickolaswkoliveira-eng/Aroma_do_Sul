@@ -96,6 +96,19 @@ class StockMovement(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
 
 
+class OwnConsumption(Base):
+    __tablename__ = "consumo_proprio"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("produtos.id"), index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    unit_cost: Mapped[float] = mapped_column(Money, default=0)
+    total_cost: Mapped[float] = mapped_column(Money, default=0)
+    consumed_by: Mapped[str] = mapped_column(String(80), default="")
+    reason: Mapped[str] = mapped_column(String(160), default="")
+    responsible: Mapped[str] = mapped_column(String(80), default="SISTEMA_HOMOLOGACAO")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
+
+
 class Customer(Base):
     __tablename__ = "clientes"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -126,8 +139,27 @@ class Comanda(Base):
     table_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="Aberta", index=True)
     total: Mapped[float] = mapped_column(Money, default=0)
+    discount: Mapped[float] = mapped_column(Money, default=0, server_default="0")
+    discount_reason: Mapped[str] = mapped_column(String(160), default="", server_default="")
+    discount_by: Mapped[str] = mapped_column(String(80), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ComandaPayment(Base):
+    __tablename__ = "comanda_pagamentos"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    comanda_id: Mapped[int] = mapped_column(ForeignKey("comandas.id"), index=True)
+    method: Mapped[str] = mapped_column(String(30))
+    amount: Mapped[float] = mapped_column(Money)
+    received_by: Mapped[str] = mapped_column(String(80), default="SISTEMA_HOMOLOGACAO")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now)
+
+
+class AppSetting(Base):
+    __tablename__ = "configuracoes"
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
 
 
 class ComandaOrder(Base):

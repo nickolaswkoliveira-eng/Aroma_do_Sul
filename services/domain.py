@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import date, timedelta
+from decimal import Decimal
 from functools import wraps
 from math import ceil
 from sqlalchemy import func, select
@@ -11,12 +12,13 @@ from typing import Concatenate, ParamSpec, TypeVar
 
 from config import MODO_DEMONSTRACAO
 from models.entities import (
-    Audit, CashMovement, CashSession, Comanda, ComandaOrder, Customer, Order,
-    OrderItem, Payable, Product, Receivable, RecipeItem, Stock, StockMovement,
+    Audit, CashMovement, CashSession, Comanda, ComandaOrder, ComandaPayment, Customer, Order,
+    OrderItem, OwnConsumption, Payable, Product, Receivable, RecipeItem, Stock, StockMovement,
 )
 from services.demo_environment import track_demo_records
+from services.manager_pin import verify_manager_pin
 from utils.clock import local_now, local_today
-from utils.money import money, money_float, money_sum
+from utils.money import CENT, money, money_float, money_sum
 
 
 STATUSES = ("Recebido", "Em preparo", "Pronto", "Entregue", "Finalizado", "Cancelado")
@@ -350,18 +352,58 @@ def cancel_order(session: Session, order: Order, reason: str,
     session.commit()
 
 
+PAYMENT_METHODS = ("Dinheiro", "Pix", "Crédito", "Débito")
+
+
+def _paid_total(session: Session, comanda_id: int) -> Decimal:
+    return money(session.scalar(
+        select(func.coalesce(func.sum(ComandaPayment.amount), 0)).where(ComandaPayment.comanda_id == comanda_id)
+    ))
+
+
+def comanda_balance(session: Session, comanda: Comanda) -> dict[str, float]:
+    """Subtotal, desconto, valor a pagar, já pago e saldo restante da comanda."""
+    subtotal = money(comanda.total)
+    discount = min(money(comanda.discount), subtotal)
+    due = subtotal - discount
+    paid = _paid_total(session, comanda.id)
+    return {
+        "subtotal": float(subtotal),
+        "discount": float(discount),
+        "due": float(due),
+        "paid": float(paid),
+        "remaining": float(max(due - paid, Decimal("0.00"))),
+    }
+
+
+def equal_share(remaining: float, people: int) -> float:
+    """Parcela por pessoa; os centavos que sobram ficam para a última a pagar."""
+    if people < 1:
+        raise ValueError("Informe ao menos uma pessoa.")
+    if people == 1:
+        return money_float(remaining)
+    cents = int(money(remaining) * 100)
+    return money_float(Decimal(cents // people) / 100)
+
+
+def discount_from_percent(subtotal: float, percent: float) -> float:
+    if percent <= 0 or percent >= 100:
+        raise ValueError("O percentual deve estar entre 0 e 100.")
+    return money_float(money(subtotal) * money(percent) / 100)
+
+
 @_track_demo_mutations
-def close_comanda(
+def receive_comanda_payment(
     session: Session,
     comanda: Comanda,
     method: str,
+    amount: float,
     responsible: str = "SISTEMA_HOMOLOGACAO",
-) -> float:
+) -> dict[str, float | bool]:
     locked_comanda = _lock_comanda(session, comanda.id)
     if locked_comanda.status != "Aberta":
         raise ValueError("Esta comanda já foi fechada.")
-    allowed_methods = ("Dinheiro", "Pix", "Crédito", "Débito")
-    if method not in allowed_methods:
+    if method not in PAYMENT_METHODS:
         raise ValueError("Forma de pagamento inválida.")
     pending_order = session.scalar(
         select(Order.id)
@@ -379,26 +421,104 @@ def close_comanda(
         raise ValueError("Abra o caixa antes de receber o pagamento da comanda.")
     if locked_comanda.total <= 0:
         raise ValueError("Não é possível fechar uma comanda sem valor.")
+    received = money(amount)
+    if received <= 0:
+        raise ValueError("O valor recebido deve ser maior que zero.")
+    remaining = money(comanda_balance(session, locked_comanda)["remaining"])
+    if remaining <= 0:
+        raise ValueError("Não há saldo a receber nesta comanda.")
+    if received > remaining:
+        raise ValueError(f"O valor excede o saldo da comanda (falta R$ {remaining:.2f}).")
 
-    locked_comanda.status = "Fechada"
-    locked_comanda.closed_at = local_now()
-    locked_comanda.total = money_float(locked_comanda.total)
+    session.add(ComandaPayment(
+        comanda_id=locked_comanda.id, method=method, amount=float(received), received_by=responsible,
+    ))
     session.add(CashMovement(
         cash_session_id=cash.id,
         movement_type="Entrada",
         method=method,
-        amount=locked_comanda.total,
+        amount=float(received),
         description=f"Comanda #{locked_comanda.id}",
     ))
+    new_remaining = remaining - received
+    closed = new_remaining <= 0
+    if closed:
+        locked_comanda.status = "Fechada"
+        locked_comanda.closed_at = local_now()
+        locked_comanda.total = money_float(locked_comanda.total)
     audit(
         session,
-        "Comanda fechada",
-        f"Comanda #{locked_comanda.id} | {method} | R$ {locked_comanda.total:.2f}",
+        "Comanda fechada" if closed else "Pagamento parcial de comanda",
+        f"Comanda #{locked_comanda.id} | {method} | R$ {received:.2f}"
+        + ("" if closed else f" | falta R$ {new_remaining:.2f}"),
         responsible,
     )
-    total = locked_comanda.total
     session.commit()
-    return total
+    return {"amount": float(received), "remaining": float(new_remaining), "closed": closed}
+
+
+def close_comanda(
+    session: Session,
+    comanda: Comanda,
+    method: str,
+    responsible: str = "SISTEMA_HOMOLOGACAO",
+) -> float:
+    """Recebe todo o saldo restante em uma única forma de pagamento e fecha a comanda."""
+    remaining = comanda_balance(session, comanda)["remaining"]
+    return float(receive_comanda_payment(session, comanda, method, remaining, responsible)["amount"])
+
+
+@_track_demo_mutations
+def apply_comanda_discount(
+    session: Session,
+    comanda: Comanda,
+    amount: float,
+    reason: str,
+    manager_pin: str,
+    responsible: str = "SISTEMA_HOMOLOGACAO",
+) -> float:
+    verify_manager_pin(session, manager_pin, responsible)
+    locked_comanda = _lock_comanda(session, comanda.id)
+    if locked_comanda.status != "Aberta":
+        raise ValueError("Só é possível dar desconto em comandas abertas.")
+    discount = money(amount)
+    if discount <= 0:
+        raise ValueError("Informe um desconto maior que zero.")
+    limit = money(locked_comanda.total) - _paid_total(session, locked_comanda.id) - CENT
+    if limit <= 0 or discount > limit:
+        raise ValueError(
+            "O desconto deve deixar ao menos R$ 0,01 a pagar"
+            + (f" (máximo R$ {limit:.2f})." if limit > 0 else ".")
+        )
+    locked_comanda.discount = float(discount)
+    locked_comanda.discount_reason = (reason or "").strip()[:160]
+    locked_comanda.discount_by = responsible[:80]
+    audit(
+        session,
+        "Desconto aplicado em comanda",
+        f"Comanda #{locked_comanda.id} | R$ {discount:.2f} | motivo: {locked_comanda.discount_reason or '-'}"
+        " | autorizado com PIN do gerente",
+        responsible,
+    )
+    session.commit()
+    return float(discount)
+
+
+@_track_demo_mutations
+def remove_comanda_discount(
+    session: Session,
+    comanda: Comanda,
+    responsible: str = "SISTEMA_HOMOLOGACAO",
+) -> None:
+    locked_comanda = _lock_comanda(session, comanda.id)
+    if locked_comanda.status != "Aberta":
+        raise ValueError("Só é possível alterar o desconto de comandas abertas.")
+    previous = money(locked_comanda.discount)
+    locked_comanda.discount = 0
+    locked_comanda.discount_reason = ""
+    locked_comanda.discount_by = ""
+    audit(session, "Desconto removido de comanda", f"Comanda #{locked_comanda.id} | R$ {previous:.2f}", responsible)
+    session.commit()
 
 
 @_track_demo_mutations
@@ -459,6 +579,58 @@ def move_stock(session: Session, product_id: int, movement_type: str, quantity: 
                               responsible=responsible))
     audit(session, "Movimentação de estoque", f"Produto #{product_id} | {movement_type} {quantity:g} | {reason}", responsible)
     session.commit()
+
+
+@_track_demo_mutations
+def register_own_consumption(
+    session: Session,
+    product_id: int,
+    quantity: int,
+    consumed_by: str = "",
+    reason: str = "",
+    responsible: str = "SISTEMA_HOMOLOGACAO",
+) -> float:
+    """Baixa o estoque de um consumo interno e registra o custo como perda, sem mexer no caixa."""
+    if isinstance(quantity, bool) or int(quantity) != quantity or quantity <= 0:
+        raise ValueError("A quantidade deve ser um número inteiro maior que zero.")
+    product = session.get(Product, product_id)
+    if product is None:
+        raise ValueError("Produto não encontrado.")
+    required = _stock_requirements(session, {product_id: int(quantity)})
+    _lock_stocks(session, set(required))
+    _validate_stock(session, required)
+    unit_cost = money(product_unit_costs(session, {product_id}).get(product_id, 0))
+    total_cost = unit_cost * int(quantity)
+    consumption = OwnConsumption(
+        product_id=product_id,
+        quantity=int(quantity),
+        unit_cost=float(unit_cost),
+        total_cost=float(total_cost),
+        consumed_by=(consumed_by or "").strip()[:80],
+        reason=(reason or "").strip()[:160],
+        responsible=responsible[:80],
+    )
+    session.add(consumption)
+    session.flush()
+    _consume_order_stock(session, required, consumption.id, responsible, "Consumo próprio")
+    audit(
+        session,
+        "Consumo próprio registrado",
+        f"{int(quantity)}× {product.name} | custo R$ {total_cost:.2f}"
+        + (f" | {consumption.consumed_by}" if consumption.consumed_by else ""),
+        responsible,
+    )
+    session.commit()
+    return float(total_cost)
+
+
+def own_consumption_total(session: Session, start: date, end: date) -> float:
+    return money_float(session.scalar(
+        select(func.coalesce(func.sum(OwnConsumption.total_cost), 0)).where(
+            func.date(OwnConsumption.created_at) >= start,
+            func.date(OwnConsumption.created_at) <= end,
+        )
+    ))
 
 
 @_track_demo_mutations

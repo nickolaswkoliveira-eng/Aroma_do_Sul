@@ -72,19 +72,15 @@ def _render_live_orders_panel_auto() -> None:
 def render(session: Session) -> None:
     quick_mode = st.query_params.get("acesso") == "atendimento"
     locked_table_number = _query_table_number(st.query_params.get("mesa"))
-    section_heading(
-        "Pedidos",
-        "Atendimento rápido por mesa" if quick_mode else "Monte o pedido e acompanhe o atendimento",
-    )
     if "cart" not in st.session_state:
         st.session_state.cart = {}
     if quick_mode:
         st.markdown(QUICK_MODE_STYLE, unsafe_allow_html=True)
-        if locked_table_number is not None:
-            st.caption(f"Modo atendimento ativo · Mesa {locked_table_number:02d}")
-        else:
+        st.title("Novo pedido" + (f" · Mesa {locked_table_number:02d}" if locked_table_number is not None else ""))
+        if locked_table_number is None:
             st.warning("Mesa inválida no QR Code. Use um QR de mesa entre 01 e 05.")
     else:
+        section_heading("Pedidos", "Monte o pedido e acompanhe o atendimento")
         live_refresh = persistent_toggle(
             "Atualizar pedidos em tempo real (8s)",
             key="orders.live_refresh",
@@ -113,14 +109,17 @@ def _render_order_builder_content(session: Session, quick_mode: bool, locked_tab
     print_now = st.session_state.pop("orders.print_now", None)
     if print_now:
         components.html(print_now, height=0)
-    with st.expander("🖨️ Impressão da cozinha (80 mm)"):
-        st.toggle("Imprimir automaticamente ao finalizar", value=True, key="orders.auto_print")
-        last_ticket = st.session_state.get("orders.last_ticket")
-        if last_ticket and st.button("Reimprimir último pedido", key="orders.reprint"):
-            st.session_state["orders.print_now"] = last_ticket.replace(
-                "</body>", "<script>window.onload=function(){window.focus();window.print();};</script></body>")
-            st.rerun(scope="fragment")
-        st.caption("Na janela de impressão, escolha a I7 Plus e papel 80 mm. Dica: ative a impressão direta (kiosk) no navegador para não abrir a janela.")
+    if quick_mode:
+        st.session_state["orders.auto_print"] = False
+    else:
+        with st.expander("🖨️ Impressão da cozinha (80 mm)"):
+            st.toggle("Imprimir automaticamente ao finalizar", value=True, key="orders.auto_print")
+            last_ticket = st.session_state.get("orders.last_ticket")
+            if last_ticket and st.button("Reimprimir último pedido", key="orders.reprint"):
+                st.session_state["orders.print_now"] = last_ticket.replace(
+                    "</body>", "<script>window.onload=function(){window.focus();window.print();};</script></body>")
+                st.rerun(scope="fragment")
+            st.caption("Na janela de impressão, escolha a I7 Plus e papel 80 mm. Dica: ative a impressão direta (kiosk) no navegador para não abrir a janela.")
     products = session.scalars(select(Product).where(Product.active.is_(True), Product.sale_price > 0).order_by(Product.name)).all()
     categories = session.scalars(select(Category).where(Category.active.is_(True)).order_by(Category.name)).all()
     open_comandas = session.scalars(
@@ -174,7 +173,6 @@ def _render_order_builder_content(session: Session, quick_mode: bool, locked_tab
             selected_category = persistent_selectbox("Categoria", category_names, key="orders.category", default="Todas")
         with search_column:
             search = persistent_text_input("Buscar produto", key="orders.search", placeholder="Nome ou código")
-        st.caption("Atalhos de categoria")
         quick_buttons_per_row = 5
         for start in range(0, len(category_names), quick_buttons_per_row):
             chunk = category_names[start:start + quick_buttons_per_row]
@@ -221,9 +219,8 @@ def _render_order_builder_content(session: Session, quick_mode: bool, locked_tab
     visible = visible[page_start:page_start + page_size]
     catalog, summary = st.columns([2.15, 1], gap="large")
     with catalog:
-        st.caption(f"{len(visible)} produtos disponíveis")
-        if quick_mode:
-            st.caption("Toque no produto para adicionar 1 unidade ao pedido.")
+        if not quick_mode:
+            st.caption(f"{len(visible)} produtos disponíveis")
         if not visible:
             st.info("Nenhum produto corresponde aos filtros atuais.")
         grid = st.columns(4 if quick_mode else 3)

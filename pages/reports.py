@@ -74,13 +74,13 @@ def _daily_sales_dataframe(
         )
         .order_by(CashMovement.created_at)
     ).all()
-    movement_by_comanda = {}
+    movements_by_comanda: dict[int, list[CashMovement]] = {}
     for movement in movement_rows:
         if not movement.description.startswith("Comanda #"):
             continue
         code = movement.description.split("#", 1)[1].strip()
         if code.isdigit():
-            movement_by_comanda[int(code)] = movement
+            movements_by_comanda.setdefault(int(code), []).append(movement)
     order_count_rows = session.execute(
         select(ComandaOrder.comanda_id, func.count(ComandaOrder.id))
         .where(ComandaOrder.comanda_id.in_(comanda_ids))
@@ -89,13 +89,22 @@ def _daily_sales_dataframe(
     order_count_by_comanda = {comanda_id: count for comanda_id, count in order_count_rows}
     rows = []
     total = 0.0
+    total_discount = 0.0
     by_method: dict[str, float] = {}
     for comanda in comandas:
-        movement = movement_by_comanda.get(comanda.id)
-        amount = movement.amount if movement is not None else comanda.total
-        method = movement.method if movement is not None else "Não informado"
+        movements = movements_by_comanda.get(comanda.id, [])
+        if movements:
+            amount = sum(item.amount for item in movements)
+            method = " + ".join(dict.fromkeys(item.method for item in movements))
+            for item in movements:
+                by_method[item.method] = by_method.get(item.method, 0.0) + item.amount
+        else:
+            amount = max(comanda.total - (comanda.discount or 0), 0)
+            method = "Não informado"
+            by_method[method] = by_method.get(method, 0.0) + amount
         total += amount
-        by_method[method] = by_method.get(method, 0.0) + amount
+        discount = float(comanda.discount or 0)
+        total_discount += discount
         rows.append({
             "Hora": comanda.closed_at.strftime("%d/%m %H:%M" if is_range else "%H:%M") if comanda.closed_at else "-",
             "Comanda": comanda.id,
@@ -103,6 +112,7 @@ def _daily_sales_dataframe(
             "Pedidos": int(order_count_by_comanda.get(comanda.id, 0)),
             "Forma de pagamento": method,
             "Valor": float(amount),
+            "Desconto": discount,
         })
     frame = pd.DataFrame(rows)
     summary = {
@@ -110,6 +120,7 @@ def _daily_sales_dataframe(
         "count": len(rows),
         "ticket": float(total / len(rows)) if rows else 0.0,
         "by_method": by_method,
+        "discount": float(total_discount),
     }
     return frame, summary
 
@@ -123,6 +134,7 @@ def _daily_sales_excel(frame: pd.DataFrame, summary: dict, target_day: date, end
             "Total vendido": summary["total"],
             "Comandas fechadas": summary["count"],
             "Ticket médio": summary["ticket"],
+            "Descontos concedidos": summary.get("discount", 0.0),
         }])
         header.to_excel(writer, index=False, sheet_name="Resumo")
         if methods:
@@ -158,6 +170,13 @@ def _daily_sales_pdf(frame: pd.DataFrame, summary: dict, target_day: date, end_d
         new_x=XPos.LMARGIN,
         new_y=YPos.NEXT,
     )
+    pdf.cell(
+        0,
+        8,
+        f"Descontos concedidos: {currency(summary.get('discount', 0.0))}",
+        new_x=XPos.LMARGIN,
+        new_y=YPos.NEXT,
+    )
     pdf.ln(2)
     methods = summary.get("by_method", {})
     if methods:
@@ -172,16 +191,18 @@ def _daily_sales_pdf(frame: pd.DataFrame, summary: dict, target_day: date, end_d
     pdf.cell(25, 8, "Comanda", border=1)
     pdf.cell(20, 8, "Mesa", border=1)
     pdf.cell(20, 8, "Pedidos", border=1)
-    pdf.cell(50, 8, "Forma", border=1)
-    pdf.cell(40, 8, "Valor", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(45, 8, "Forma", border=1)
+    pdf.cell(35, 8, "Valor", border=1)
+    pdf.cell(25, 8, "Desconto", border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("Helvetica", "", 10)
     for row in frame.itertuples(index=False):
         pdf.cell(30, 7, str(row[0]), border=1)
         pdf.cell(25, 7, str(row[1]), border=1)
         pdf.cell(20, 7, str(row[2]), border=1)
         pdf.cell(20, 7, str(row[3]), border=1)
-        pdf.cell(50, 7, str(row[4])[:25], border=1)
-        pdf.cell(40, 7, currency(float(row[5])), border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(45, 7, str(row[4])[:22], border=1)
+        pdf.cell(35, 7, currency(float(row[5])), border=1)
+        pdf.cell(25, 7, currency(float(row[6])), border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     return bytes(pdf.output())
 
 
@@ -292,13 +313,15 @@ def _sales_report(session: Session, basic: bool = False) -> None:
     period_text = _period_label(target_day, end_day)
     file_suffix = f"{target_day:%Y-%m-%d}" if end_day is None else f"{target_day:%Y-%m-%d}_a_{end_day:%Y-%m-%d}"
     daily_frame, summary = _daily_sales_dataframe(session, target_day, end_day)
-    daily_metrics = st.columns(3)
+    daily_metrics = st.columns(4)
     with daily_metrics[0]:
         metric_card("Total vendido", currency(summary["total"]), period_text)
     with daily_metrics[1]:
         metric_card("Comandas fechadas", str(summary["count"]), "Recebimentos no caixa")
     with daily_metrics[2]:
         metric_card("Ticket médio", currency(summary["ticket"]), "Total dividido por comandas")
+    with daily_metrics[3]:
+        metric_card("Descontos", currency(summary.get("discount", 0.0)), "Concedidos no período")
     if daily_frame.empty:
         st.info("Sem vendas registradas para o período selecionado.")
     else:
@@ -327,6 +350,7 @@ def _sales_report(session: Session, basic: bool = False) -> None:
                     "Pedidos": row["Pedidos"],
                     "Forma de pagamento": row["Forma de pagamento"],
                     "Valor": currency(float(row["Valor"])),
+                    "Desconto": currency(float(row["Desconto"])) if row["Desconto"] else "-",
                 }
                 for _, row in daily_frame.iterrows()
             ],

@@ -1,6 +1,7 @@
+import logging
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -86,8 +87,61 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 DemoSessionLocal = sessionmaker(bind=demo_engine, autoflush=False, expire_on_commit=False)
 
 
+def _ensure_runtime_schema(target_engine) -> None:
+    required_columns = {
+        "comandas": {
+            "table_number": "INTEGER",
+            "discount": "NUMERIC(12, 2) DEFAULT 0",
+            "discount_reason": "VARCHAR(160) DEFAULT ''",
+            "discount_by": "VARCHAR(80) DEFAULT ''",
+        },
+        "pedidos": {"table_number": "INTEGER"},
+    }
+    required_indexes = {
+        "comandas": {"ix_comandas_table_number": "table_number"},
+        "pedidos": {"ix_pedidos_table_number": "table_number"},
+    }
+    with target_engine.begin() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        for table, columns in required_columns.items():
+            if table not in tables:
+                continue
+            existing_columns = {column["name"] for column in inspector.get_columns(table)}
+            for column_name, column_type in columns.items():
+                if column_name not in existing_columns:
+                    if_not_exists = "IF NOT EXISTS " if target_engine.dialect.name == "postgresql" else ""
+                    connection.execute(text(
+                        f'ALTER TABLE "{table}" ADD COLUMN {if_not_exists}"{column_name}" {column_type}'
+                    ))
+        inspector = inspect(connection)
+        for table, indexes in required_indexes.items():
+            if table not in tables:
+                continue
+            existing_indexes = {index["name"] for index in inspector.get_indexes(table)}
+            for index_name, column_name in indexes.items():
+                if index_name not in existing_indexes:
+                    connection.execute(text(
+                        f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{table}" ("{column_name}")'
+                    ))
+
+
+_schema_checked_engines: set[int] = set()
+
+
+def _ensure_schema_once(target_engine) -> None:
+    if id(target_engine) in _schema_checked_engines:
+        return
+    try:
+        _ensure_runtime_schema(target_engine)
+        _schema_checked_engines.add(id(target_engine))
+    except Exception:
+        logging.getLogger(__name__).exception("Falha ao garantir o schema do banco.")
+
+
 def get_session(demo: bool | None = None):
     use_demo_database = MODO_DEMONSTRACAO if demo is None else demo
+    _ensure_schema_once(demo_engine if use_demo_database else engine)
     return (DemoSessionLocal if use_demo_database else SessionLocal)()
 
 
@@ -105,3 +159,4 @@ def init_database(demo: bool | None = None) -> None:
             BACKUP_RETENTION_COUNT,
         )
     ModelsBase.metadata.create_all(bind=target_engine)
+    _ensure_runtime_schema(target_engine)

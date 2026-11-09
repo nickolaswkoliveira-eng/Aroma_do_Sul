@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from database.connection import Base, DemoSessionLocal, demo_engine
 from models.entities import (
-    Audit, CashFlow, CashMovement, CashSession, Category, Comanda, ComandaOrder,
-    Customer, DemoRecord, Ingredient, Order, OrderItem, Payable, Product,
+    Audit, CashFlow, CashMovement, CashSession, Category, Comanda, ComandaOrder, ComandaPayment,
+    Customer, DemoRecord, Ingredient, Order, OrderItem, OwnConsumption, Payable, Product,
     Receivable, RecipeItem, Role, RolePermission, Stock, StockMovement, User,
 )
 from utils.clock import local_now
@@ -24,7 +24,7 @@ MAX_BACKUP_SIZE_BYTES = 100 * 1024 * 1024
 BACKUP_FORMAT_VERSION = 1
 
 _DEMO_MODELS_TO_DELETE = (
-    CashFlow, CashMovement, ComandaOrder, OrderItem, StockMovement, RecipeItem,
+    CashFlow, CashMovement, ComandaPayment, ComandaOrder, OrderItem, OwnConsumption, StockMovement, RecipeItem,
     Ingredient, Stock, Payable, Receivable, CashSession, Order, Comanda, Customer,
     Product, Category, Audit,
 )
@@ -34,7 +34,7 @@ _ALL_MODELS_BY_TABLE = {
     model.__tablename__: model
     for model in (
         Audit, CashFlow, CashMovement, CashSession, Category, Comanda,
-        ComandaOrder, Customer, DemoRecord, Ingredient, Order, OrderItem,
+        ComandaOrder, ComandaPayment, Customer, DemoRecord, Ingredient, Order, OrderItem, OwnConsumption,
         Payable, Product, Receivable, RecipeItem, Role, RolePermission, Stock,
         StockMovement, User,
     )
@@ -43,7 +43,9 @@ _PROTECTED_TABLES = (
     "perfis", "permissoes", "perfil_permissoes", "usuarios",
     "auditoria_login", "auditoria",
 )
-_LEGACY_OPTIONAL_BACKUP_TABLES = {"comandas", "comanda_pedidos"}
+_LEGACY_OPTIONAL_BACKUP_TABLES = {
+    "comandas", "comanda_pedidos", "comanda_pagamentos", "configuracoes", "consumo_proprio",
+}
 
 
 def _track_new_demo_records(session: Session, flush_context, instances) -> None:
