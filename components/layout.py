@@ -54,7 +54,15 @@ def configure_page() -> None:
     [data-testid="stMetric"] { background: transparent; border: 0; padding: .35rem 0; }
     [data-testid="stMetricLabel"], [data-testid="stCaption"], [data-testid="stWidgetLabel"] { color: var(--muted) !important; }
     [data-testid="stMetricValue"], [data-testid="stMetricDelta"] { color: var(--ink) !important; }
+    [data-testid="stAlert"] [data-testid="stAlertContainer"] {
+      background-color: #E8F1FA !important;
+      color: var(--ink) !important;
+    }
+    [data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) { background-color: #FFF3D7 !important; }
+    [data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) { background-color: #FCE8E5 !important; }
+    [data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) { background-color: #E8F3EA !important; }
     [data-testid="stAlert"] [data-testid="stMarkdownContainer"] { color: var(--ink) !important; }
+    [data-testid="stAlert"] [data-testid="stMarkdownContainer"] a { color: #233F9A !important; }
     div.stButton > button { border-radius: 8px; min-height: 2.5rem; border-color: var(--line); background-color: var(--surface) !important; color: var(--ink) !important; transition: border-color .16s ease, background-color .16s ease; }
     div.stButton > button:not([kind="primary"]) { background-color: var(--surface) !important; border-color: var(--line) !important; color: var(--ink) !important; }
     div.stButton > button[kind="primary"] { background-color: var(--espresso) !important; border-color: var(--espresso); color: #FFFFFF !important; }
